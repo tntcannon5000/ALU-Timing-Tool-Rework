@@ -8,10 +8,10 @@ def fuzzy_window_search(search_term):
             title = win32gui.GetWindowText(hwnd)
             if search_term.lower() in title.lower():
                 rect = win32gui.GetWindowRect(hwnd)
-                x1 = rect[0]
-                y1 = rect[1]
-                x2 = rect[2]
-                y2 = rect[3]
+                x1 = rect[0]+8
+                y1 = rect[1]+8
+                x2 = rect[2]-8
+                y2 = rect[3]-8
                 coords = (x1, y1, x2, y2)
                 results.append(coords)
     
@@ -36,7 +36,7 @@ def calculate_aspect_ratio(coords):
 
 
 def check_aspect_ratio_validity(aspect_ratio):
-    if aspect_ratio < 1.15 or aspect_ratio > 1.95:
-        print("The aspect ratio is unreasonable.")
+    if aspect_ratio < 1.15 or aspect_ratio > 2.3334:
+        raise ValueError("The aspect ratio is unreasonable.")
     else:
         print("The aspect ratio is reasonable.")
