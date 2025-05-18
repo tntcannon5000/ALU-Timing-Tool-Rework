@@ -1,4 +1,5 @@
 import win32gui
+import win32api
 
 def fuzzy_window_search(search_term):
     results = []
@@ -40,3 +41,36 @@ def check_aspect_ratio_validity(aspect_ratio):
         raise ValueError("The aspect ratio is unreasonable.")
     else:
         print("The aspect ratio is reasonable.")
+
+def get_monitor_number_from_coords(coords):
+    """
+    Returns the monitor number (0-based) that contains the center of the given window coordinates.
+    """
+    x1, y1, x2, y2 = coords
+    center_x = (x1 + x2) // 2
+    center_y = (y1 + y2) // 2
+
+    monitors = win32api.EnumDisplayMonitors()
+    for idx, (handle, hdc, monitor_rect) in enumerate(monitors):
+        mx1, my1, mx2, my2 = monitor_rect
+        if mx1 <= center_x < mx2 and my1 <= center_y < my2:
+            return idx
+    raise ValueError("Window is not on any detected monitor.")
+
+def normalise_coords_to_monitor(coords, monitor_number):
+    """
+    Normalises the coordinates of a window to the specified monitor.
+    """
+    x1, y1, x2, y2 = coords
+    monitors = win32api.EnumDisplayMonitors()
+    monitor_rect = monitors[monitor_number][2]
+    mx1, my1, mx2, my2 = monitor_rect
+
+    # Calculate the offset of the monitor
+    offset_x = mx1
+    offset_y = my1
+
+    # Normalise the coordinates
+    norm_coords = (x1 - offset_x, y1 - offset_y, x2 - offset_x, y2 - offset_y)
+    
+    return norm_coords
