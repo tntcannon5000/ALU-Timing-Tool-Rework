@@ -138,3 +138,4 @@ def get_dist_box(region_rgb: np.ndarray,
 
     # nothing found
     return None
+

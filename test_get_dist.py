@@ -1,3 +1,5 @@
+import os
+#os.environ["PYTORCH_ENABLE_XPU_FALLBACK"] = "1"
 import dxcam_cpp as dxcam
 from src.utils.windowtools import (
     fuzzy_window_search,
@@ -9,23 +11,19 @@ from src.utils.windowtools import (
 from src.utils.helpers import (
     pre_process,
     pre_process_distbox,
-    extract_dist_percentage,
-    get_dist_box
 )
+from src.utils.gpu import get_easyocr_reader_xpu
 #import matplotlib.pyplot as plt
-from easyocr import Reader
-import pytesseract
-config = '--psm 7 --oem 1 -c tessedit_char_whitelist=0123456789%'
-from matplotlib import pyplot as plt
-import line_profiler
+#import line_profiler
 import numpy as np
-import cv2
 import tkinter as tk
 import threading
 import time as systime
-import os
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv())
 
 os.environ["LINE_PROFILE"] = "1"
+os.environ["PYTORCH_ENABLE_XPU_FALLBACK"] = "1"
 
 coords = fuzzy_window_search("asphalt")
 
@@ -42,7 +40,10 @@ print(coords)
 camera = dxcam.create(device_idx=0, output_idx=monitor_id)
 capturing = True
 time = 0
-reader = Reader(['en'], gpu=True)
+elapsed_ms = 0
+percentage = 0
+
+reader = get_easyocr_reader_xpu(languages=['en'])
 
 # Grab a frame from the camera
 window = camera.grab()
@@ -65,13 +66,14 @@ def stop_capturing():
     print("Capturing stopped")
 
 def update_time_label():
-    global time
-    while True:
-        time_label.config(text=time)
-        time_label.update()
-        systime.sleep(0.1)
+    time_label.config(text=f"Time: {time}")
+    elapsed_label.config(text=f"Elapsed: {elapsed_ms:.2f} ms")
+    percentage_label.config(text=f"Percentage: {percentage}")
+    # Schedule the next update in 100 ms
+    time_label.after(100, update_time_label)
 
 def create_ui():
+    global time_label, elapsed_label, percentage_label
     root = tk.Tk()
     root.title("Capture Control")
 
@@ -81,13 +83,20 @@ def create_ui():
     stop_button = tk.Button(root, text="Stop", command=stop_capturing, bg="red", fg="white", font=("Helvetica", 16))
     stop_button.pack(pady=10)
 
-    global time_label
     time_label = tk.Label(root, text=f"Time: {time}", font=("Helvetica", 14))
     time_label.pack(pady=10)
 
-    threading.Thread(target=update_time_label, daemon=True).start()
+    elapsed_label = tk.Label(root, text=f"Elapsed: {elapsed_ms:.2f} ms", font=("Helvetica", 14))
+    elapsed_label.pack(pady=10)
+
+    percentage_label = tk.Label(root, text=f"Percentage: {percentage}", font=("Helvetica", 14))
+    percentage_label.pack(pady=10)
+
+    # Start periodic UI updates in the main thread
+    update_time_label()
 
     root.mainloop()
+# ...existing code...
 
 
 
@@ -98,13 +107,15 @@ textarray = []
 dist_box = None
 
 
-@line_profiler.profile
+#@line_profiler.profile
 def the_loop():
     global dist_box
     global capturing
     global textarray
     global reader
     global camera
+    global percentage
+    global elapsed_ms
 
         # Start the loop
     while capturing:
@@ -120,9 +131,6 @@ def the_loop():
                 preprocessed_region = pre_process(top_right_region)
 
                 results = reader.readtext(preprocessed_region)
-
-                # Convert image for drawing
-                boxed = cv2.cvtColor(preprocessed_region, cv2.COLOR_GRAY2RGB)
                 
                 for i, (bbox, text, _) in enumerate(results):
                     if "dist" in text.lower():
@@ -165,8 +173,8 @@ def the_loop():
             #clear_output(wait=False)
 
             # run clear in terminal
-            os.system('cls' if os.name == 'nt' else 'clear')  # Windows: cls, Unix/Linux/macOS: clear
-
+            #os.system('cls' if os.name == 'nt' else 'clear')  # Windows: cls, Unix/Linux/macOS: clear
+            #os.system('cls')
             # If we have the bounding box, crop the image
             if dist_box is not None:
                 roi = top_right_region[int(dist_box[0][1]):int(dist_box[2][1]), int(dist_box[0][0]):int(dist_box[1][0])]
@@ -184,28 +192,30 @@ def the_loop():
 
                 #textxdddd = pytesseract.image_to_string(preprocessed_region, config=config)
 
-                textxdddd = reader.readtext(preprocessed_region, detail=0, allowlist='0123456789%')
+                textxdddd = reader.recognize(preprocessed_region, detail=0, allowlist='0123456789%')
+                print(textxdddd)
 
             # Append text to a single string
             try:
                 text2 = ''.join(textxdddd).replace(" ", "")
                 # store text in an array
-                print("extracted text:", textxdddd)
+                percentage = text2.strip()
                 textxdddd = ""
+
                 if not text2:
                     dist_box = None
                     print("No DIST found in text, resetting bounding box.")
             except Exception as e:
                 dist_box = None
-
+            text2 = ""
             end_time = systime.perf_counter()    # End timing
             elapsed_ms = (end_time - start_time) * 1000
             print(f"Loop iteration took {elapsed_ms:.2f} ms")
 
-            systime.sleep(0.1)
+            systime.sleep(0.2)
 
 if __name__ == "__main__":
 
-    ui_thread = threading.Thread(target=create_ui)
-    ui_thread.start()
+    #ui_thread = threading.Thread(target=create_ui)
+    #ui_thread.start()
     the_loop()
