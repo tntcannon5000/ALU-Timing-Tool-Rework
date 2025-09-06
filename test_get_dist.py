@@ -12,18 +12,16 @@ from src.utils.helpers import (
     pre_process,
     pre_process_distbox,
 )
-from src.utils.gpu import get_easyocr_reader_xpu
+from easyocr import Reader
 #import matplotlib.pyplot as plt
 #import line_profiler
 import numpy as np
 import tkinter as tk
 import threading
 import time as systime
-from dotenv import load_dotenv, find_dotenv
-load_dotenv(find_dotenv())
 
 os.environ["LINE_PROFILE"] = "1"
-os.environ["PYTORCH_ENABLE_XPU_FALLBACK"] = "1"
+
 
 coords = fuzzy_window_search("asphalt")
 
@@ -43,7 +41,7 @@ time = 0
 elapsed_ms = 0
 percentage = 0
 
-reader = get_easyocr_reader_xpu(languages=['en'])
+reader = Reader(['en'], gpu=True)
 
 # Grab a frame from the camera
 window = camera.grab()
@@ -184,6 +182,8 @@ def the_loop():
 
                 # Preprocess the cropped image
                 preprocessed_region = pre_process_distbox(roi)
+
+                
                 # imshow the cropped image
                 # plt.imshow(preprocessed_region, cmap='gray')
                 # plt.axis('off')

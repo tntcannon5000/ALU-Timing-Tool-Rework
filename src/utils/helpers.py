@@ -27,27 +27,37 @@ def pre_process(region: np.ndarray) -> np.ndarray:
 
     return thresh
 
-def pre_process_distbox(region: np.ndarray) -> np.ndarray:
+def pre_process_distbox(region: np.ndarray, for_cnn: bool = False) -> np.ndarray:
     """
     Preprocesses the given image region by:
     1. Converting to grayscale (if not already).
     2. Applying a binary threshold where light grays/whites become white, everything else black.
     3. Inverting the result to produce black text on white background.
+    4. If for_cnn=True, returns the image in the format expected by the CNN model.
 
     Parameters:
         region (np.ndarray): RGB or grayscale image region (as a NumPy array).
+        for_cnn (bool): If True, returns image ready for CNN inference.
 
     Returns:
-        np.ndarray: Preprocessed binary image (uint8) ready for OCR.
+        np.ndarray: Preprocessed binary image (uint8) ready for OCR or CNN.
     """
 
     gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
 
+    # Binary threshold: treat anything above a certain gray level as white
+    _, thresh = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
 
     # Invert: white becomes black, black becomes white
-    inverted = cv2.bitwise_not(gray)
+    inverted = cv2.bitwise_not(thresh)
 
-    return inverted
+    if for_cnn:
+        # For CNN, we want the original inverted format (black text on white background)
+        # but we need to return it as grayscale for PIL conversion
+        return inverted
+    else:
+        # For OCR, return the inverted image as before
+        return inverted
 
 def extract_dist_percentage(text: str) -> str:
     """

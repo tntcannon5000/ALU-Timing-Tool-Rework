@@ -1,0 +1,12 @@
+pyscreeze
+keyboard
+Pillow
+shelve
+matplotlib
+pytesseract
+numpy
+opencv-python
+dxcam
+dxcam-cpp
+tkinter
+mouse
