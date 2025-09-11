@@ -1,6 +1,14 @@
 import cv2
 import re
+import os
 import numpy as np
+from .windowtools import (
+    fuzzy_window_search,
+    calculate_aspect_ratio,
+    check_aspect_ratio_validity,
+    get_monitor_number_from_coords,
+    normalise_coords_to_monitor
+)
 
 def pre_process(region: np.ndarray) -> np.ndarray:
     """
@@ -148,4 +156,79 @@ def get_dist_box(region_rgb: np.ndarray,
 
     # nothing found
     return None
+
+
+def setup_window_capture(window_name: str = "asphalt"):
+    """
+    Setup window capture by finding the window and calculating coordinates.
+    
+    Args:
+        window_name: Name of the window to search for
+        
+    Returns:
+        Tuple of (coords, monitor_id, normalised_coords, aspect_ratio, capture_coords)
+    """
+    # Find the window coordinates
+    coords = fuzzy_window_search(window_name)
+    
+    # Get the monitor ID
+    monitor_id = get_monitor_number_from_coords(coords)
+    
+    # Normalize coordinates to monitor
+    normalised_coords = normalise_coords_to_monitor(coords, monitor_id)
+    
+    # Calculate and validate aspect ratio
+    aspect_ratio = calculate_aspect_ratio(normalised_coords)
+    check_aspect_ratio_validity(aspect_ratio)
+    
+    # Calculate capture coordinates
+    x1, y1, x2, y2 = normalised_coords
+    capture_coords = (x1, y1, x2, int(y1 + (y2 - y1) / 3.4))
+    
+    return coords, monitor_id, normalised_coords, aspect_ratio, capture_coords
+
+
+def get_asset_path(asset_type: str, filename: str = None) -> str:
+    """
+    Get the full path to an asset file within the src/assets directory.
+    
+    Args:
+        asset_type: Type of asset ('models', 'templates')
+        filename: Optional filename to append to the path
+    
+    Returns:
+        str: Full path to the asset
+    """
+    # Get the directory containing this helpers.py file
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # Go up to src directory, then down to assets
+    src_dir = os.path.dirname(current_dir)
+    assets_dir = os.path.join(src_dir, 'assets', asset_type)
+    
+    if filename:
+        return os.path.join(assets_dir, filename)
+    return assets_dir
+
+
+def get_model_path(model_name: str) -> str:
+    """
+    Get the full path to a model file.
+    
+    Args:
+        model_name: Name of the model file
+    
+    Returns:
+        str: Full path to the model file
+    """
+    return get_asset_path('models', model_name)
+
+
+def get_template_dir() -> str:
+    """
+    Get the full path to the timer templates directory.
+    
+    Returns:
+        str: Full path to the timer templates directory
+    """
+    return get_asset_path('templates', 'timer_templates')
 
