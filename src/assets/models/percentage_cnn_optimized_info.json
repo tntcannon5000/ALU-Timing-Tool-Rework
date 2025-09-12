@@ -1,0 +1,9 @@
+{
+  "model_type": "optimized",
+  "num_classes": 100,
+  "input_size": [
+    64,
+    64
+  ],
+  "parameters": 688392
+}
