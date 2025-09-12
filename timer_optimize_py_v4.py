@@ -274,35 +274,75 @@ class ALUTimingTool:
     def _process_timer_if_needed(self, window: np.ndarray, percentage_changed: bool):
         """
         Process timer extraction if percentage changed.
+        Retries until exactly 7 digits are detected or max retries reached.
         
         Args:
             window: Full frame
             percentage_changed: Whether percentage changed
         """
         if percentage_changed and self.timer_roi_coords is not None:
-            # Extract timer at this milestone
-            timer_roi = self.image_processor.extract_timer_roi_from_coords(window, self.timer_roi_coords)
-            if timer_roi is not None:
-                extracted_timer = self.image_processor.process_timer_roi(
-                    timer_roi, self.timer_recognizer, self.last_percentage
-                )
-                if extracted_timer:
-                    self.current_timer = extracted_timer
+            max_retries = 5  # Maximum number of retry attempts
+            retry_count = 0
+            extracted_timer = None
+            
+            while retry_count < max_retries and extracted_timer is None:
+                # Extract timer at this milestone
+                timer_roi = self.image_processor.extract_timer_roi_from_coords(window, self.timer_roi_coords)
+                if timer_roi is not None:
+                    extracted_timer = self.image_processor.process_timer_roi(
+                        timer_roi, self.timer_recognizer, self.last_percentage
+                    )
                     
-                    # Convert to milliseconds and update display
-                    timer_ms = self.timer_recognizer.convert_to_milliseconds(extracted_timer)
-                    if timer_ms is not None:
-                        self.current_timer_ms = timer_ms
-                        # Format for display: MM:SS.mmm
-                        minutes = timer_ms // 60000
-                        seconds = (timer_ms % 60000) // 1000
-                        milliseconds = timer_ms % 1000
-                        self.current_timer_display = f"{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
-                        self.ui.update_timer(self.current_timer_display)
+                    if extracted_timer is not None:
+                        # Successfully extracted exactly 7 digits
+                        self.current_timer = extracted_timer
                         
-                        # Update delta display (placeholder for now)
-                        # TODO: Calculate actual delta based on target time
-                        self.ui.update_delta("+99.999")
+                        # Convert to milliseconds and update display
+                        timer_ms = self.timer_recognizer.convert_to_milliseconds(extracted_timer)
+                        if timer_ms is not None:
+                            self.current_timer_ms = timer_ms
+                            # Format for display: MM:SS.mmm
+                            minutes = timer_ms // 60000
+                            seconds = (timer_ms % 60000) // 1000
+                            milliseconds = timer_ms % 1000
+                            self.current_timer_display = f"{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+                            self.ui.update_timer(self.current_timer_display)
+                            
+                            # Update delta display (placeholder for now)
+                            # TODO: Calculate actual delta based on target time
+                            self.ui.update_delta("+99.999")
+                        break
+                    else:
+                        # Didn't get exactly 7 digits, retry
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            print(f"Retry {retry_count}/{max_retries} for timer extraction at {self.last_percentage}%")
+                            # Re-find timer ROI coordinates for next attempt
+                            old_timer_roi_coords = self.timer_roi_coords
+                            self.timer_roi_coords = self.image_processor.find_timer_roi_coords(window)
+                            # Clear digit ROI cache if timer position changed
+                            if old_timer_roi_coords != self.timer_roi_coords:
+                                self.timer_recognizer.clear_digit_roi_cache()
+                            if self.timer_roi_coords is None:
+                                print(f"Failed to find timer ROI on retry {retry_count}")
+                                break
+                else:
+                    # Failed to extract timer ROI, retry with new coordinates
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        print(f"Retry {retry_count}/{max_retries} for timer ROI extraction at {self.last_percentage}%")
+                        # Re-find timer ROI coordinates for next attempt
+                        old_timer_roi_coords = self.timer_roi_coords
+                        self.timer_roi_coords = self.image_processor.find_timer_roi_coords(window)
+                        # Clear digit ROI cache if timer position changed
+                        if old_timer_roi_coords != self.timer_roi_coords:
+                            self.timer_recognizer.clear_digit_roi_cache()
+                        if self.timer_roi_coords is None:
+                            print(f"Failed to find timer ROI on retry {retry_count}")
+                            break
+            
+            if extracted_timer is None:
+                print(f"Failed to extract timer with exactly 7 digits after {max_retries} attempts at {self.last_percentage}%")
     
     def run_main_loop(self):
         """Run the main processing loop."""
@@ -332,7 +372,12 @@ class ALUTimingTool:
             percentage_changed = False
             if self.dist_box is None:
                 # Recalculate timer ROI coordinates when dist_box is None (re-searching for race)
+                old_timer_roi_coords = self.timer_roi_coords
                 self.timer_roi_coords = self.image_processor.find_timer_roi_coords(window)
+                
+                # Clear digit ROI cache if timer position changed
+                if old_timer_roi_coords != self.timer_roi_coords:
+                    self.timer_recognizer.clear_digit_roi_cache()
                 
                 # Find DIST bounding box
                 self.dist_box = self._find_dist_bbox(top_right_region)
