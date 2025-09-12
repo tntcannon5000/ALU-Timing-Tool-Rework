@@ -20,7 +20,8 @@ from src.modules import (
     TimerRecognizer,
     ImageProcessor,
     CNNPredictor,
-    TimingToolUI
+    TimingToolUI,
+    RaceDataManager
 )
 
 
@@ -44,7 +45,8 @@ class ALUTimingTool:
         self.timer_recognizer = TimerRecognizer()
         self.image_processor = ImageProcessor()
         self.cnn_predictor = CNNPredictor(confidence_threshold)
-        self.ui = TimingToolUI()
+        self.race_data_manager = RaceDataManager()
+        self.ui = TimingToolUI(self.race_data_manager)
         
         # Camera and capture setup
         self.camera = None
@@ -63,14 +65,36 @@ class ALUTimingTool:
         self.current_timer_ms = 0
         self.current_timer_display = "00:00.000"
         self.percentage = "0%"
+        self.race_completed = False
+        self.max_percentage_reached = 0
+        self.race_in_progress = False
+        self.reached_98_percent = False
+        self.reached_99_percent_capture = False
+        self.at_99_percent = False
+        self.last_captured_timer_ms = 0  # Store last captured timer for final time
+        self.last_valid_99_percent_timer = 0  # Store last valid timer at 99%
+        self.last_valid_delta = "--.---"  # Store last valid delta for display at 99%
+        self.last_valid_delta = "--.---"  # Store last valid delta for display at 99%
         
         # Performance tracking
         self.loop_times: List[float] = []
         self.avg_loop_time = 0.0
         self.total_loops = 0
         
+        # UI update throttling
+        self.last_ui_update = 0
+        self.ui_update_interval = 1.0 / 48.0  # Update UI at 48 fps (~20.8ms)
+        
         # Setup window capture
         self._setup_capture()
+        
+        # Setup UI callbacks
+        self.ui.set_callbacks(
+            on_mode_change=self._on_mode_change,
+            on_load_ghost=self._on_load_ghost,
+            on_save_ghost=self._on_save_ghost,
+            on_save_race=self._on_save_race
+        )
         
         # Start UI
         self.ui_thread = self.ui.start_ui_thread()
@@ -99,6 +123,39 @@ class ALUTimingTool:
         # Start camera with region
         self.camera.start(region=self.capture_coords, target_fps=90)
         print("Camera setup complete!")
+    
+    def _on_mode_change(self, mode: str):
+        """Handle race mode change."""
+        print(f"Race mode changed to: {mode}")
+        # Allow switching to race mode without ghost - user can load ghost later
+    
+    def _on_load_ghost(self, filepath: str):
+        """Handle loading a ghost file."""
+        success = self.race_data_manager.load_ghost_data(filepath)
+        if success:
+            filename = self.race_data_manager.get_ghost_filename()
+            self.ui.update_ghost_filename(filename)
+            print(f"Loaded ghost: {filename}")
+        else:
+            self.ui.show_message("Error", "Failed to load ghost file. Please check the file format.", is_error=True)
+    
+    def _on_save_race(self, filename: str):
+        """Handle saving race data."""
+        success = self.race_data_manager.save_race_data(filename)
+        if success:
+            print(f"Saved race data: {filename}.json")
+        else:
+            self.ui.show_message("Error", "Failed to save race data.", is_error=True)
+    
+    def _on_save_ghost(self, filepath: str):
+        """Handle saving current race data as ghost file."""
+        success = self.race_data_manager.save_race_data(filepath.replace('.json', ''))
+        if success:
+            # Show temporary "Ghost Saved!" message instead of popup
+            self.ui.show_ghost_saved_message()
+            print(f"Saved ghost: {filepath}")
+        else:
+            self.ui.show_message("Error", "Failed to save ghost file. No race data available.", is_error=True)
     
     def _find_dist_bbox(self, top_right_region: np.ndarray) -> Optional[np.ndarray]:
         """
@@ -250,37 +307,76 @@ class ALUTimingTool:
             percentage_changed = False
             if self.last_percentage != predicted_percentage:
                 percentage_changed = True
+                previous_percentage = self.last_percentage
                 self.last_percentage = predicted_percentage
                 print(f"Percentage changed to: {predicted_percentage}%")
+                
+                # Check for race completion conditions
+                if predicted_percentage >= 99:
+                    self.reached_98_percent = True
+                if predicted_percentage >= 99:
+                    if not hasattr(self, 'reached_99_percent_capture') or not self.reached_99_percent_capture:
+                        self.reached_99_percent_capture = True
+                        print("Reached 99% - capturing timer each loop for precise finish detection")
+                
+                # Track when we reach 99% for race completion detection
+                if predicted_percentage == 99:
+                    self.at_99_percent = True
+                    print("Reached 99% - watching for timer extraction failures to detect race completion")
+                elif predicted_percentage != 99:
+                    self.at_99_percent = False
+                
+                # Race completion detection: was at 99% and now dropped
+                if (previous_percentage == 99 and 
+                    predicted_percentage < 99 and 
+                    not self.race_completed and 
+                    self.race_in_progress):
+                    print(f"Race completed! Dropped from 99% to {predicted_percentage}%")
+                    self._handle_race_completion()
+                
+                # Update max percentage reached
+                if predicted_percentage > self.max_percentage_reached:
+                    self.max_percentage_reached = predicted_percentage
+                
+                # Mark race as in progress if we have a valid percentage
+                if predicted_percentage > 0 and not self.race_in_progress:
+                    self.race_in_progress = True
+                    print(f"Race in progress detected at {predicted_percentage}%")
             
             self.percentage = f"{predicted_percentage}%"
-            self.ui.update_percentage(self.percentage)
-
+            
+            # Throttled UI update for percentage
+            current_time = systime.time()
+            if current_time - self.last_ui_update >= self.ui_update_interval:
+                self.ui.update_percentage(self.percentage)
+                self.last_ui_update = current_time
+            
             # Reset bounding box if confidence is too low
             if not self.cnn_predictor.is_confident(confidence):
                 self.dist_box = None
                 
-            # Update UI with inference times
-            self.ui.update_inference_time(
-                self.cnn_predictor.inference_times[-1] if self.cnn_predictor.inference_times else 0,
-                self.cnn_predictor.avg_inference_time
-            )
+            # Update UI with inference times (also throttled)
+            if current_time - self.last_ui_update >= self.ui_update_interval:
+                self.ui.update_inference_time(
+                    self.cnn_predictor.inference_times[-1] if self.cnn_predictor.inference_times else 0,
+                    self.cnn_predictor.avg_inference_time
+                )
             
             return predicted_percentage if percentage_changed else None
         else:
             self.dist_box = None
             return None
     
-    def _process_timer_if_needed(self, window: np.ndarray, percentage_changed: bool):
+    def _process_timer_if_needed(self, window: np.ndarray, should_extract: bool):
         """
-        Process timer extraction if percentage changed.
+        Process timer extraction if needed.
         Retries until exactly 7 digits are detected or max retries reached.
         
         Args:
             window: Full frame
-            percentage_changed: Whether percentage changed
+            should_extract: Whether to extract timer (percentage changed or frequent capture mode)
         """
-        if percentage_changed and self.timer_roi_coords is not None:
+        if should_extract and self.timer_roi_coords is not None:
             max_retries = 5  # Maximum number of retry attempts
             retry_count = 0
             extracted_timer = None
@@ -300,7 +396,25 @@ class ALUTimingTool:
                         # Convert to milliseconds and update display
                         timer_ms = self.timer_recognizer.convert_to_milliseconds(extracted_timer)
                         if timer_ms is not None:
+                            # Check for race completion: at 99% and timer goes backwards
+                            if (self.at_99_percent and 
+                                self.reached_98_percent and 
+                                not self.race_completed and 
+                                self.race_in_progress and
+                                self.last_captured_timer_ms > 0 and
+                                timer_ms < self.last_captured_timer_ms):
+                                print(f"Race completed! At 99% and timer went backwards: {timer_ms}ms < {self.last_captured_timer_ms}ms")
+                                self._handle_race_completion()
+                                return  # Don't process this timer value
+                            
                             self.current_timer_ms = timer_ms
+                            # Store last captured timer for final time recording
+                            self.last_captured_timer_ms = timer_ms
+                            
+                            # If we're at 99%, also store this as the last valid 99% timer
+                            if self.last_percentage == 99:
+                                self.last_valid_99_percent_timer = timer_ms
+                            
                             # Format for display: MM:SS.mmm
                             minutes = timer_ms // 60000
                             seconds = (timer_ms % 60000) // 1000
@@ -308,9 +422,47 @@ class ALUTimingTool:
                             self.current_timer_display = f"{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
                             self.ui.update_timer(self.current_timer_display)
                             
-                            # Update delta display (placeholder for now)
-                            # TODO: Calculate actual delta based on target time
-                            self.ui.update_delta("+99.999")
+                            # Record time data and update delta
+                            current_mode = self.ui.get_current_mode()
+                            percentage_num = int(self.last_percentage) if self.last_percentage is not None else 0
+                            
+                            # Only save time data if we're actually in a race
+                            if self.race_in_progress:
+                                self.race_data_manager.record_time_at_percentage(percentage_num, timer_ms)
+                                print(f"Recorded time at {percentage_num}%: {timer_ms}ms")
+                                # Update save ghost button state
+                                self.ui.update_save_ghost_button_state()
+                            
+                            # Calculate and display delta (skip if at 99% to prevent freakouts)
+                            if (current_mode == "race" and 
+                                self.race_data_manager.is_ghost_loaded() and 
+                                self.race_in_progress and 
+                                percentage_num < 99):  # Don't calculate delta at 99%
+                                delta_seconds = self.race_data_manager.calculate_delta(percentage_num, timer_ms)
+                                if delta_seconds is not None:
+                                    # Format delta: +/- seconds with 3 decimal places
+                                    delta_sign = "+" if delta_seconds >= 0 else ""
+                                    delta_str = f"{delta_sign}{delta_seconds:.3f}"
+                                    self.last_valid_delta = delta_str  # Store the last valid delta
+                                    self.ui.update_delta(delta_str)
+                                    
+                                    # Update background color based on delta
+                                    self.ui.update_background_color("race", delta_seconds)
+                                    
+                                    print(f"Race delta at {percentage_num}%: {delta_str}s")
+                                else:
+                                    self.ui.update_delta("--.---")
+                            elif (current_mode == "race" and 
+                                  self.race_data_manager.is_ghost_loaded() and 
+                                  self.race_in_progress and 
+                                  percentage_num == 99):
+                                # At 99%, show the last valid delta instead of calculating new one
+                                self.ui.update_delta(self.last_valid_delta)
+                                print(f"At 99% - showing last valid delta: {self.last_valid_delta}")
+                            else:
+                                # Record mode, no ghost loaded - show placeholder
+                                self.ui.update_delta("--.---")
+                                self.ui.update_background_color("record")
                         break
                     else:
                         # Didn't get exactly 7 digits, retry
@@ -343,6 +495,103 @@ class ALUTimingTool:
             
             if extracted_timer is None:
                 print(f"Failed to extract timer with exactly 7 digits after {max_retries} attempts at {self.last_percentage}%")
+                
+                # Check for race completion: at 99% and timer extraction fails
+                if (self.at_99_percent and 
+                    self.reached_98_percent and 
+                    not self.race_completed and 
+                    self.race_in_progress):
+                    print("Race completed! At 99% and timer extraction failed - race finished")
+                    self._handle_race_completion()
+    
+    def _handle_race_completion(self):
+        """Handle race completion logic."""
+        current_mode = self.ui.get_current_mode()
+        if current_mode == "record" and not self.race_completed:
+            self.race_completed = True
+            
+            # Record final time at 100% using the best available timer
+            final_time = self.last_captured_timer_ms
+            # Use the last valid 99% timer if it's higher than the last captured timer
+            if (self.last_valid_99_percent_timer > 0 and 
+                self.last_valid_99_percent_timer > final_time):
+                final_time = self.last_valid_99_percent_timer
+                print(f"Using last valid 99% timer ({final_time}ms) instead of last captured timer ({self.last_captured_timer_ms}ms)")
+            
+            if final_time > 0:
+                self.race_data_manager.record_final_time(final_time)
+            
+            print("Race completed! Prompting to save race data...")
+            
+            # Prompt to save race data in a separate thread to avoid blocking the main loop
+            import threading
+            def prompt_save():
+                import time
+                time.sleep(1)  # Small delay to ensure UI is ready
+                self.ui.prompt_save_race()
+            
+            threading.Thread(target=prompt_save, daemon=True).start()
+        elif current_mode == "race":
+            self.race_completed = True
+            
+            # Record final time for race mode too using the best available timer
+            final_time = self.last_captured_timer_ms
+            # Use the last valid 99% timer if it's higher than the last captured timer
+            if (self.last_valid_99_percent_timer > 0 and 
+                self.last_valid_99_percent_timer > final_time):
+                final_time = self.last_valid_99_percent_timer
+                print(f"Using last valid 99% timer ({final_time}ms) instead of last captured timer ({self.last_captured_timer_ms}ms)")
+            
+            if final_time > 0:
+                self.race_data_manager.record_final_time(final_time)
+            
+            print("Race completed in race mode! Prompting to save new ghost...")
+            
+            # Prompt to save race data in race mode as well
+            import threading
+            def prompt_save():
+                import time
+                time.sleep(1)  # Small delay to ensure UI is ready
+                self.ui.prompt_save_race()
+            
+            threading.Thread(target=prompt_save, daemon=True).start()
+    
+    def _handle_race_end(self):
+        """Handle when race ends (dist_box becomes None)."""
+        if self.race_in_progress:
+            current_mode = self.ui.get_current_mode()
+            
+            # If we reached 98%+ and then dist_box became None, this is race completion
+            if self.reached_98_percent and not self.race_completed:
+                print("Race completed! Reached 98%+ and then exited to menus")
+                self._handle_race_completion()
+            
+            # Reset race tracking state but keep the data
+            self.race_in_progress = False
+            print("Race ended - returned to menus")
+    
+    def _handle_potential_race_start(self):
+        """Handle potential start of a new race."""
+        # Reset race completion flags but keep data until we're sure it's a new race
+        if self.race_completed:
+            print("Potential new race detected after completion - resetting race state")
+            self.reset_race_state()
+    
+    def reset_race_state(self):
+        """Reset race state for a new race."""
+        self.race_completed = False
+        self.max_percentage_reached = 0
+        self.race_in_progress = False
+        self.reached_98_percent = False
+        self.reached_99_percent_capture = False
+        self.at_99_percent = False
+        self.last_captured_timer_ms = 0
+        self.last_valid_99_percent_timer = 0
+        self.last_valid_delta = "--.---"
+        self.race_data_manager.reset_race_data()
+        # Update save ghost button state after reset
+        self.ui.update_save_ghost_button_state()
+        print("Race state reset for new race")
     
     def run_main_loop(self):
         """Run the main processing loop."""
@@ -371,6 +620,11 @@ class ALUTimingTool:
             # OCR search when needed
             percentage_changed = False
             if self.dist_box is None:
+                # dist_box is None - race not in progress (menus, etc.)
+                if self.race_in_progress:
+                    print("Race ended - dist_box became None (likely in menus)")
+                    self._handle_race_end()
+                
                 # Recalculate timer ROI coordinates when dist_box is None (re-searching for race)
                 old_timer_roi_coords = self.timer_roi_coords
                 self.timer_roi_coords = self.image_processor.find_timer_roi_coords(window)
@@ -381,13 +635,24 @@ class ALUTimingTool:
                 
                 # Find DIST bounding box
                 self.dist_box = self._find_dist_bbox(top_right_region)
+                
+                # If we found dist_box again, we might be starting a new race
+                if self.dist_box is not None and not self.race_in_progress:
+                    print("Potential race start detected - dist_box found")
+                    self._handle_potential_race_start()
             
             # CNN prediction
             predicted_percentage = self._process_cnn_prediction(top_right_region)
             percentage_changed = predicted_percentage is not None
             
-            # Timer extraction only when percentage changes
-            self._process_timer_if_needed(window, percentage_changed)
+            # Timer extraction - capture every loop when above 99%, otherwise only when percentage changes
+            force_timer_capture = self.reached_99_percent_capture and self.last_percentage >= 99
+            self._process_timer_if_needed(window, percentage_changed or force_timer_capture)
+            
+            # If dist_box is None (not in race), ensure we show placeholder
+            if self.dist_box is None:
+                self.ui.update_delta("--.---")
+                self.ui.update_background_color("record")
             
             # End timing the entire loop
             loop_end_time = systime.perf_counter()
@@ -429,7 +694,14 @@ class ALUTimingTool:
             'avg_loop_time': self.avg_loop_time,
             'current_percentage': self.percentage,
             'current_timer': self.current_timer_display,
-            'timer_ms': self.current_timer_ms
+            'timer_ms': self.current_timer_ms,
+            'race_in_progress': self.race_in_progress,
+            'race_completed': self.race_completed,
+            'max_percentage_reached': self.max_percentage_reached,
+            'reached_98_percent': self.reached_98_percent,
+            'race_mode': self.ui.get_current_mode() if self.ui else 'record',
+            'ghost_loaded': self.race_data_manager.is_ghost_loaded(),
+            'ghost_filename': self.race_data_manager.get_ghost_filename()
         }
         
         # Add CNN stats
