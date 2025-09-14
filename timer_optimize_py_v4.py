@@ -10,6 +10,7 @@ import cv2
 import time as systime
 from easyocr import Reader
 from typing import Optional, List
+from collections import deque
 
 from src.utils.helpers import (
     pre_process,
@@ -21,7 +22,8 @@ from src.modules import (
     ImageProcessor,
     CNNPredictor,
     TimingToolUI,
-    RaceDataManager
+    RaceDataManager,
+    FrameCaptureThread
 )
 
 
@@ -50,8 +52,15 @@ class ALUTimingTool:
         
         # Camera and capture setup
         self.camera = None
+        self.capture_thread = None
         self.capture_coords = None
         self.monitor_id = None
+        
+        # 🚀 PERFORMANCE: Cached region coordinates to eliminate recalculation
+        self._cached_frame_width = None
+        self._cached_frame_height = None
+        self._cached_top_right_region_coords = None  # (y1, y2, x1, x2) for slicing
+        self._cached_cnn_roi_fraction = 23 / 40  # Pre-compute fraction for CNN ROI
         
         # OCR reader
         self.reader = Reader(['en'], gpu=True)
@@ -76,8 +85,8 @@ class ALUTimingTool:
         self.last_valid_delta = "--.---"  # Store last valid delta for display at 99%
         self.last_valid_delta = "--.---"  # Store last valid delta for display at 99%
         
-        # Performance tracking
-        self.loop_times: List[float] = []
+        # Performance tracking - optimized with deque for O(1) operations
+        self.loop_times = deque(maxlen=30)  # Fixed size deque instead of list with manual management
         self.avg_loop_time = 0.0
         self.total_loops = 0
         
@@ -113,6 +122,7 @@ class ALUTimingTool:
         print(f"Capture coords: {self.capture_coords}")
         
         # Initialize camera
+
         self.camera = dxcam.create(device_idx=0, output_idx=self.monitor_id)
         print("Camera initialized.")
         # Test grab
@@ -122,7 +132,56 @@ class ALUTimingTool:
         print("Initial frame grabbed successfully.")
         # Start camera with region
         self.camera.start(region=self.capture_coords, target_fps=90)
+        
+        # Initialize and start threaded capture with ultra-low latency settings
+        self.capture_thread = FrameCaptureThread(
+            self.camera, 
+            max_queue_size=1,  # Minimal queue for absolute lowest latency
+            target_fps=90
+        )
+        self.capture_thread.start()
         print("Camera setup complete!")
+    
+    def _cache_region_coordinates(self, frame_shape):
+        """
+        Cache region coordinates for performance optimization.
+        Only recalculates if frame dimensions change.
+        
+        Args:
+            frame_shape: Shape tuple (height, width, channels)
+        """
+        height, width = frame_shape[:2]
+        
+        if (self._cached_frame_width != width or 
+            self._cached_frame_height != height):
+            
+            # Cache frame dimensions
+            self._cached_frame_width = width
+            self._cached_frame_height = height
+            
+            # Pre-calculate top-right region coordinates for slicing
+            # Original: window[50:height, 0:int(width * 0.35)]
+            x_end = int(width * 0.35)  # Calculate once and cache
+            self._cached_top_right_region_coords = (50, height, 0, x_end)
+            
+            print(f"🚀 Cached region coordinates: height={height}, width={width}, x_end={x_end}")
+    
+    def _get_top_right_region(self, window: np.ndarray) -> np.ndarray:
+        """
+        Extract top-right region using cached coordinates for performance.
+        
+        Args:
+            window: Full frame
+            
+        Returns:
+            Top-right region for processing
+        """
+        # Ensure coordinates are cached
+        self._cache_region_coordinates(window.shape)
+        
+        # Use cached coordinates for ultra-fast slicing
+        y1, y2, x1, x2 = self._cached_top_right_region_coords
+        return window[y1:y2, x1:x2]
     
     def _on_mode_change(self, mode: str):
         """Handle race mode change."""
@@ -289,7 +348,8 @@ class ALUTimingTool:
         # Extract ROI
         roi = top_right_region[int(self.dist_box[0][1]):int(self.dist_box[2][1]), 
                               int(self.dist_box[0][0]):int(self.dist_box[1][0])]
-        roi = roi[:, int(roi.shape[1] * 23 / 40):]
+        # 🚀 PERFORMANCE: Use cached fraction instead of recalculating
+        roi = roi[:, int(roi.shape[1] * self._cached_cnn_roi_fraction):]
 
         # Preprocess the cropped image for CNN
         preprocessed_region = pre_process_distbox(roi, for_cnn=True)
@@ -605,13 +665,23 @@ class ALUTimingTool:
             loop_start_time = systime.perf_counter()
             self.total_loops += 1
             
-            # Get latest frame
-            window = self.camera.get_latest_frame()
+            # Get latest frame from capture thread
+            window = None
+            if self.capture_thread and self.capture_thread.is_running():
+                # Try to get latest frame first (non-blocking)
+                window = self.capture_thread.get_latest_frame()
+                
+                # If no frame available, try with a very short timeout for gaming
+                if window is None:
+                    window = self.capture_thread.get_frame_timeout(timeout=0.001)  # 1ms timeout for ultra-low latency
+            
             if window is None:
+                # 🚀 ULTRA-LOW LATENCY: Minimal sleep only when no frame available
+                systime.sleep(0.0001)  # 0.1ms instead of 1ms for gaming responsiveness
                 continue
                 
-            height, width, _ = window.shape
-            top_right_region = window[50:height, 0:int(width * 0.35)]
+            # 🚀 PERFORMANCE: Use cached region extraction instead of recalculating
+            top_right_region = self._get_top_right_region(window)
 
             # Always update timer ROI coordinates to keep track of timer location
             if self.timer_roi_coords is None:
@@ -658,23 +728,37 @@ class ALUTimingTool:
             loop_end_time = systime.perf_counter()
             elapsed_ms = (loop_end_time - loop_start_time) * 1000
             
-            # Update loop time tracking with running average (30 samples)
+            # Update loop time tracking with running average using deque (O(1) operations)
             self.loop_times.append(elapsed_ms)
-            if len(self.loop_times) > 30:  # Keep last 30 measurements for running average
-                self.loop_times.pop(0)
+            # No need to manually pop - deque handles max length automatically
             
             # Calculate new average loop time
             self.avg_loop_time = sum(self.loop_times) / len(self.loop_times)
             
             # Update UI
             self.ui.update_loop_time(elapsed_ms, self.avg_loop_time)
+            
+            # Update capture stats in UI (throttled)
+            current_time = systime.time()
+            if current_time - self.last_ui_update >= self.ui_update_interval:
+                if self.capture_thread:
+                    capture_stats = self.capture_thread.get_stats()
+                    # You can add this to the UI if desired - for now just track it
+                    pass
 
-            systime.sleep(0.001)
+            # 🚀 ULTRA-LOW LATENCY: Adaptive sleep based on frame availability
+            # Only sleep if no frames are being processed to maximize responsiveness
+            if self.capture_thread and self.capture_thread.get_latest_frame() is None:
+                systime.sleep(0.0001)  # Minimal 0.1ms sleep only when idle
     
     def stop(self):
         """Stop the application."""
         print("Stopping ALU Timing Tool...")
         self.capturing = False
+        
+        # Stop capture thread first
+        if self.capture_thread:
+            self.capture_thread.stop()
         
         if self.camera:
             self.camera.stop()
@@ -706,5 +790,10 @@ class ALUTimingTool:
         
         # Add CNN stats
         stats.update(self.cnn_predictor.get_stats())
+        
+        # Add capture thread stats
+        if self.capture_thread:
+            capture_stats = self.capture_thread.get_stats()
+            stats.update({f'capture_{k}': v for k, v in capture_stats.items()})
         
         return stats
