@@ -4,7 +4,7 @@ Main Timer Application
 This module contains the main application logic for the ALU Timing Tool.
 """
 
-import dxcam_cpp as dxcam
+import dxcam as dxcam
 import numpy as np
 import cv2
 import time as systime
@@ -114,12 +114,12 @@ class ALUTimingTool:
         
         # Initialize camera
         self.camera = dxcam.create(device_idx=0, output_idx=self.monitor_id)
-        
+        print("Camera initialized.")
         # Test grab
         window = self.camera.grab()
         if window is None:
             raise RuntimeError("Failed to grab initial frame from camera")
-        
+        print("Initial frame grabbed successfully.")
         # Start camera with region
         self.camera.start(region=self.capture_coords, target_fps=90)
         print("Camera setup complete!")

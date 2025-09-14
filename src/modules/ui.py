@@ -61,6 +61,9 @@ class TimingToolUI:
         self.current_inference_time = 0
         self.delta_time = "+00.000"  # Default delta time
         
+        # Scaling adjustment
+        self.current_scaling = 1.15  # Track current scaling value
+        
         # Callbacks for race functionality
         self.on_mode_change = None
         self.on_load_ghost = None
@@ -88,8 +91,8 @@ class TimingToolUI:
             # Ensure debug button is visible when race panel opens (unless debug is expanded)
             if hasattr(self, 'debug_button') and self.debug_button and not self.debug_expanded:
                 self.debug_button.pack(side="right", padx=5, pady=2)
-            # Fixed height for race panel (taller than before)
-            panel_height = 180 if not self.debug_expanded else 320
+            # Fixed height for race panel (taller than before) - scaled
+            panel_height = int(180 * self.current_scaling) if not self.debug_expanded else int(320 * self.current_scaling)
             # Expand window height to accommodate race panel
             current_geometry = self.root.geometry()
             parts = current_geometry.replace('x', '+').replace('+', ' ').split()
@@ -99,8 +102,8 @@ class TimingToolUI:
         else:
             # Hide race control indicator
             self.race_control_indicator.pack_forget()
-            # Calculate height based on debug panel state
-            panel_height = 180 if not self.debug_expanded else 320
+            # Calculate height based on debug panel state - scaled
+            panel_height = int(180 * self.current_scaling) if not self.debug_expanded else int(320 * self.current_scaling)
             self.race_panel.pack_forget()
             self.race_button.config(text="v", bg="#e67e22")
             # Collapse window height
@@ -115,7 +118,7 @@ class TimingToolUI:
                 self.debug_frame.pack_forget()
                 self.debug_expanded = False
                 # Adjust height calculation to account for debug panel being closed
-                panel_height += 140  # Add debug panel height to total reduction
+                panel_height += int(140 * self.current_scaling)  # Add debug panel height to total reduction
             
             # Ensure debug button is visible for next time race panel opens
             if hasattr(self, 'debug_button') and self.debug_button:
@@ -282,6 +285,198 @@ class TimingToolUI:
         # Exit the entire Python script
         sys.exit(0)
     
+    def adjust_scaling(self, delta: float):
+        """Adjust UI scaling in real-time by recreating the UI."""
+        if not self.root:
+            return
+            
+        old_scaling = self.current_scaling
+        self.current_scaling += delta
+        # Clamp scaling between 0.5 and 2.0
+        self.current_scaling = max(0.5, min(2.0, self.current_scaling))
+        
+        # Calculate scaling ratio for window size adjustment
+        scaling_ratio = self.current_scaling / old_scaling
+        
+        try:
+            # Store current window position and size
+            current_geometry = self.root.geometry()
+            parts = current_geometry.replace('x', '+').replace('+', ' ').split()
+            if len(parts) >= 4:
+                width, height, x, y = int(parts[0]), int(parts[1]), parts[2], parts[3]
+            else:
+                width, height, x, y = 300, 120, "100", "100"
+            
+            # Calculate new window size based on scaling ratio
+            new_width = int(width * scaling_ratio)
+            new_height = int(height * scaling_ratio)
+            
+            # Store current states
+            was_race_expanded = self.race_panel_expanded
+            was_debug_expanded = self.debug_expanded
+            current_mode = self.get_current_mode() if self.mode_var else "record"
+            
+            # Destroy current UI elements (but keep root window)
+            for widget in self.root.winfo_children():
+                widget.destroy()
+            
+            # Apply new scaling
+            self.root.tk.call("tk", "scaling", self.current_scaling)
+            
+            # Set new window size (start with base size, will be adjusted by panel states)
+            base_width = int(300 * self.current_scaling)
+            base_height = int(120 * self.current_scaling)
+            self.root.geometry(f"{base_width}x{base_height}")
+            
+            # Recreate the UI content
+            self._recreate_ui_content()
+            
+            # Restore states (this will adjust window size for expanded panels)
+            if self.mode_var:
+                self.mode_var.set(current_mode)
+                self.on_mode_changed()
+            
+            # Restore panel states
+            if was_race_expanded and not self.race_panel_expanded:
+                self.toggle_race_panel()
+            if was_debug_expanded and not self.debug_expanded:
+                self.toggle_debug()
+            
+            # Restore window position
+            self.root.geometry(f"+{x}+{y}")
+            
+            print(f"Scaling adjusted to: {self.current_scaling:.2f}, Window size: {new_width}x{new_height}")
+        except tk.TclError as e:
+            print(f"Error adjusting scaling: {e}")
+            pass
+    
+    def _recreate_ui_content(self):
+        """Recreate the UI content after scaling change."""
+        # Reset panel states
+        self.race_panel_expanded = False
+        self.debug_expanded = False
+        
+        # Calculate scaled dimensions
+        base_width = int(300 * self.current_scaling)
+        base_height = int(120 * self.current_scaling)
+        button_height = int(30 * self.current_scaling)
+        
+        # Set geometry with scaled size
+        self.root.geometry(f"{base_width}x{base_height}")
+        
+        # Remove window decorations and make it borderless
+        self.root.overrideredirect(True)
+        
+        # Create a hidden window for taskbar representation
+        self.taskbar_window = tk.Toplevel(self.root)
+        self.taskbar_window.title("ALU Timing Tool")
+        self.taskbar_window.geometry("1x1+0+0")  # Minimal size
+        self.taskbar_window.withdraw()  # Hide it but keep it in taskbar
+        self.taskbar_window.iconify()  # Minimize to taskbar
+        
+        # Set up the window style
+        self.root.configure(bg="#2c3e50")
+        
+        # Pin by default
+        self.is_pinned = True
+        self.root.wm_attributes("-topmost", True)
+        
+        # Create main horizontal container
+        main_container = tk.Frame(self.root, bg="#2c3e50")
+        main_container.pack(fill="both", expand=True)
+        
+        # Main UI container (center)
+        main_ui_frame = tk.Frame(main_container, bg="#2c3e50")
+        main_ui_frame.pack(side="left", fill="both", expand=True)
+        
+        # Bind drag events to main frame for window movement
+        main_ui_frame.bind("<Button-1>", self.start_drag)
+        main_ui_frame.bind("<B1-Motion>", self.on_drag)
+        
+        # Main delta display (takes up almost entire UI)
+        self.main_display_frame = tk.Frame(main_ui_frame, bg="#2c3e50")
+        self.main_display_frame.pack(fill="both", expand=True)
+        
+        # Make delta frame draggable
+        self.main_display_frame.bind("<Button-1>", self.start_drag)
+        self.main_display_frame.bind("<B1-Motion>", self.on_drag)
+        
+        self.delta_label = tk.Label(self.main_display_frame, text=self.delta_time, 
+                             font=("Helvetica", 55, "bold"), fg="#ecf0f1", bg="#2c3e50")
+        self.delta_label.pack(expand=True, fill="both")
+        
+        # Make delta label draggable
+        self.delta_label.bind("<Button-1>", self.start_drag)
+        self.delta_label.bind("<B1-Motion>", self.on_drag)
+        
+        # Bottom button section (compact)
+        button_section = tk.Frame(main_ui_frame, bg="#2c3e50", height=30)
+        button_section.pack(fill="x", side="bottom")
+        button_section.pack_propagate(False)
+        
+        # Store reference for background color updates
+        self.button_section = button_section
+        
+        # Make button section draggable
+        button_section.bind("<Button-1>", self.start_drag)
+        button_section.bind("<B1-Motion>", self.on_drag)
+        
+        # Race Control indicator (bottom left, initially hidden) - bigger and white
+        self.race_control_indicator = tk.Label(button_section, text="Race Control", 
+                                              font=("Helvetica", 10, "bold"), fg="white", bg="#2c3e50")
+        # Don't pack it initially
+        
+        # Close button (rightmost)
+        self.close_button = tk.Button(button_section, text="✕", command=self.close_app, 
+                              bg="#e74c3c", fg="white", font=("Helvetica", 8, "bold"),
+                              relief="flat", width=3, height=1)
+        self.close_button.pack(side="right", padx=2, pady=2)
+        
+        # Pin button (second from right)
+        self.pin_button = tk.Button(button_section, text="📌", command=self.toggle_pin, 
+                              bg="#4ecdc4", fg="white", font=("Helvetica", 8, "bold"),
+                              relief="flat", width=3, height=1)
+        self.pin_button.pack(side="right", padx=2, pady=2)
+        
+        # Race panel toggle button (third from right)
+        self.race_button = tk.Button(button_section, text="v", command=self.toggle_race_panel, 
+                              bg="#e67e22", fg="white", font=("Helvetica", 8, "bold"),
+                              relief="flat", width=3, height=1)
+        self.race_button.pack(side="right", padx=2, pady=2)
+        
+        # Race panel (initially hidden, below main UI)
+        self.race_panel = tk.Frame(self.root, bg="#2c3e50", height=150)
+        # Don't pack it initially
+        
+        # Create race panel content
+        self._create_race_panel_content()
+        
+        # Rebind keyboard shortcuts
+        self.root.bind_all("<Control-plus>", lambda e: self.increase_scaling())
+        self.root.bind_all("<Control-equal>", lambda e: self.increase_scaling())
+        self.root.bind_all("<Control-minus>", lambda e: self.decrease_scaling())
+        self.root.bind_all("<Control-0>", lambda e: self.reset_scaling())
+        self.root.focus_set()
+    
+    def increase_scaling(self):
+        """Increase UI scaling by 0.05."""
+        self.adjust_scaling(0.05)
+    
+    def decrease_scaling(self):
+        """Decrease UI scaling by 0.05."""
+        self.adjust_scaling(-0.05)
+    
+    def reset_scaling(self):
+        """Reset scaling to 1.0."""
+        if not self.root:
+            return
+        self.current_scaling = 1.0
+        try:
+            self.root.tk.call("tk", "scaling", self.current_scaling)
+            print(f"Scaling reset to: {self.current_scaling:.2f}")
+        except tk.TclError:
+            pass
+    
     def toggle_debug(self):
         """Toggle debug panel visibility within race panel."""
         if not self.race_panel_expanded:
@@ -292,21 +487,21 @@ class TimingToolUI:
             self.debug_frame.pack(side="bottom", fill="x", padx=0, pady=(0, 0))
             # Hide the debug button when panel is open
             self.debug_button.pack_forget()
-            # Expand window height for debug section (fixed height)
+            # Expand window height for debug section (fixed height) - scaled
             current_geometry = self.root.geometry()
             parts = current_geometry.replace('x', '+').replace('+', ' ').split()
             width, height, x, y = parts[0], parts[1], parts[2], parts[3]
-            new_height = int(height) + 140  # Add 140px for debug section
+            new_height = int(height) + int(140 * self.current_scaling)  # Add scaled debug section height
             self.root.geometry(f"{width}x{new_height}+{x}+{y}")
         else:
             self.debug_frame.pack_forget()
             # Show the debug button again when panel is closed
             self.debug_button.pack(side="right", padx=5, pady=2)
-            # Collapse window height
+            # Collapse window height - scaled
             current_geometry = self.root.geometry()
             parts = current_geometry.replace('x', '+').replace('+', ' ').split()
             width, height, x, y = parts[0], parts[1], parts[2], parts[3]
-            new_height = int(height) - 140  # Remove 140px for debug section
+            new_height = int(height) - int(140 * self.current_scaling)  # Remove scaled debug section height
             self.root.geometry(f"{width}x{new_height}+{x}+{y}")
     
     def start_drag(self, event):
@@ -364,6 +559,19 @@ class TimingToolUI:
     def create_ui(self):
         """Create the main UI window."""
         self.root = tk.Tk()
+        
+        # Fix for high DPI scaling issues (150% scaling on laptops)
+        self.root.tk.call("tk", "scaling", self.current_scaling)
+        
+        # Bind keyboard shortcuts for scaling adjustment
+        self.root.bind_all("<Control-plus>", lambda e: self.increase_scaling())
+        self.root.bind_all("<Control-equal>", lambda e: self.increase_scaling())  # For keyboards without numpad
+        self.root.bind_all("<Control-minus>", lambda e: self.decrease_scaling())
+        self.root.bind_all("<Control-0>", lambda e: self.reset_scaling())
+        
+        # Focus the root window to ensure key bindings work
+        self.root.focus_set()
+        
         self.root.title("ALU Timing Tool")
         self.root.geometry("300x120")  # Compact size when collapsed
         self.root.resizable(False, False)
