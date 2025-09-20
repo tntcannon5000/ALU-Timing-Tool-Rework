@@ -4,9 +4,8 @@ Main Timer Application
 This module contains the main application logic for the ALU Timing Tool.
 """
 
-import dxcam as dxcam
+import dxcam_cpp as dxcam
 import numpy as np
-import cv2
 import time as systime
 from easyocr import Reader
 from typing import Optional, List
@@ -67,6 +66,7 @@ class ALUTimingTool:
         
         # State variables
         self.capturing = True
+        self.shutdown_in_progress = False  # Flag to prevent double shutdown
         self.dist_box = None
         self.timer_roi_coords = None
         self.last_percentage = None
@@ -102,7 +102,8 @@ class ALUTimingTool:
             on_mode_change=self._on_mode_change,
             on_load_ghost=self._on_load_ghost,
             on_save_ghost=self._on_save_ghost,
-            on_save_race=self._on_save_race
+            on_save_race=self._on_save_race,
+            on_close=self._shutdown_all_threads
         )
         
         # Start UI
@@ -142,6 +143,44 @@ class ALUTimingTool:
         self.capture_thread.start()
         print("Camera setup complete!")
     
+    def _shutdown_all_threads(self):
+        """Shutdown all threads and cleanup resources when closing the application."""
+        if self.shutdown_in_progress:
+            return  # Already shutting down, avoid double shutdown
+            
+        self.shutdown_in_progress = True
+        print("Shutting down all threads...")
+        
+        # Stop capturing to break main loop
+        self.capturing = False
+        
+        # Stop and cleanup capture thread
+        if self.capture_thread and self.capture_thread.is_running():
+            self.capture_thread.stop()
+            # The FrameCaptureThread.stop() method handles thread joining internally
+        
+        # Stop camera
+        if self.camera:
+            try:
+                self.camera.stop()
+                print("Camera stopped successfully")
+            except Exception as e:
+                print(f"Error stopping camera: {e}")
+        
+        # Wait for UI thread to finish (it should stop when the UI closes)
+        if hasattr(self, 'ui_thread') and self.ui_thread and self.ui_thread.is_alive():
+            self.ui_thread.join(timeout=1.0)
+            if self.ui_thread.is_alive():
+                print("Warning: UI thread did not stop cleanly")
+        
+        print("All threads shutdown complete")
+
+    def stop(self):
+        """Public method to stop the application gracefully."""
+        if self.shutdown_in_progress:
+            return  # Already shutting down
+        self._shutdown_all_threads()
+
     def _cache_region_coordinates(self, frame_shape):
         """
         Cache region coordinates for performance optimization.
@@ -753,6 +792,9 @@ class ALUTimingTool:
     
     def stop(self):
         """Stop the application."""
+        if self.shutdown_in_progress:
+            return  # Already shutting down
+            
         print("Stopping ALU Timing Tool...")
         self.capturing = False
         
@@ -763,7 +805,12 @@ class ALUTimingTool:
         if self.camera:
             self.camera.stop()
         
-        self.ui.close()
+        # Only try to close UI if not already shutting down via UI close button
+        try:
+            self.ui.close()
+        except Exception as e:
+            print(f"UI already closed or closing: {e}")
+            
         print("ALU Timing Tool stopped.")
     
     def get_stats(self) -> dict:

@@ -69,6 +69,7 @@ class TimingToolUI:
         self.on_load_ghost = None
         self.on_save_ghost = None
         self.on_save_race = None
+        self.on_close = None
     
     def toggle_pin(self):
         """Toggle window pin state."""
@@ -276,11 +277,20 @@ class TimingToolUI:
     
     def close_app(self):
         """Close the application completely."""
+        # Call the close callback to stop all threads in the main application
+        if hasattr(self, 'on_close') and self.on_close:
+            try:
+                self.on_close()
+            except Exception as e:
+                print(f"Error in close callback: {e}")
+        
         if self.root:
             try:
                 self.root.quit()
                 self.root.destroy()
-            except tk.TclError:
+            except (tk.TclError, RuntimeError) as e:
+                # Handle cases where the window is already destroyed or main loop not running
+                print(f"UI cleanup warning: {e}")
                 pass
         # Exit the entire Python script
         sys.exit(0)
@@ -835,12 +845,13 @@ class TimingToolUI:
         ui_thread.start()
         return ui_thread
     
-    def set_callbacks(self, on_mode_change=None, on_load_ghost=None, on_save_ghost=None, on_save_race=None):
+    def set_callbacks(self, on_mode_change=None, on_load_ghost=None, on_save_ghost=None, on_save_race=None, on_close=None):
         """Set callback functions for race functionality."""
         self.on_mode_change = on_mode_change
         self.on_load_ghost = on_load_ghost
         self.on_save_ghost = on_save_ghost
         self.on_save_race = on_save_race
+        self.on_close = on_close
     
     def update_timer(self, timer_display: str):
         """Update timer display."""
