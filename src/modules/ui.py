@@ -9,6 +9,7 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 import sys
 import os
+from ..utils.ui_config import UIConfigManager
 
 
 class TimingToolUI:
@@ -24,6 +25,10 @@ class TimingToolUI:
         self.start_y = 0
         self.debug_expanded = False
         self.race_panel_expanded = False
+        
+        # UI Configuration Manager for position persistence
+        self.config_manager = UIConfigManager()
+        self.ui_config = self.config_manager.load_config()
         
         # Race data manager
         self.race_data_manager = race_data_manager
@@ -61,8 +66,8 @@ class TimingToolUI:
         self.current_inference_time = 0
         self.delta_time = "+00.000"  # Default delta time
         
-        # Scaling adjustment
-        self.current_scaling = 1.15  # Track current scaling value
+        # Scaling adjustment - load from config
+        self.current_scaling = self.ui_config.get("scaling", 1.15)  # Load from config or use default
         
         # Callbacks for race functionality
         self.on_mode_change = None
@@ -70,6 +75,40 @@ class TimingToolUI:
         self.on_save_ghost = None
         self.on_save_race = None
         self.on_close = None
+        
+        # Load panel states from config
+        self.race_panel_expanded = self.ui_config.get("panels", {}).get("race_panel_expanded", False)
+        self.debug_expanded = self.ui_config.get("panels", {}).get("debug_panel_expanded", False)
+        self.is_pinned = self.ui_config.get("is_pinned", True)
+    
+    def save_ui_config(self):
+        """Save current UI configuration to file."""
+        try:
+            if self.root:
+                # Get current window geometry
+                geometry = self.root.geometry()
+                geometry_info = self.config_manager.extract_geometry_from_string(geometry)
+                
+                # Update configuration
+                config = {
+                    "window_position": geometry_info["window_position"],
+                    "window_size": geometry_info["window_size"],
+                    "scaling": self.current_scaling,
+                    "is_pinned": self.is_pinned,
+                    "panels": {
+                        "race_panel_expanded": self.race_panel_expanded,
+                        "debug_panel_expanded": self.debug_expanded
+                    }
+                }
+                
+                # Save to file
+                success = self.config_manager.save_config(config)
+                if success:
+                    print("UI configuration saved successfully")
+                else:
+                    print("Failed to save UI configuration")
+        except Exception as e:
+            print(f"Error saving UI configuration: {e}")
     
     def toggle_pin(self):
         """Toggle window pin state."""
@@ -277,6 +316,9 @@ class TimingToolUI:
     
     def close_app(self):
         """Close the application completely."""
+        # Save UI configuration before closing
+        self.save_ui_config()
+        
         # Call the close callback to stop all threads in the main application
         if hasattr(self, 'on_close') and self.on_close:
             try:
@@ -387,9 +429,12 @@ class TimingToolUI:
         # Set up the window style
         self.root.configure(bg="#2c3e50")
         
-        # Pin by default
-        self.is_pinned = True
-        self.root.wm_attributes("-topmost", True)
+        # Set pin state from config
+        self.is_pinned = self.ui_config.get("is_pinned", True)
+        if self.is_pinned:
+            self.root.wm_attributes("-topmost", True)
+        else:
+            self.root.wm_attributes("-topmost", False)
         
         # Create main horizontal container
         main_container = tk.Frame(self.root, bg="#2c3e50")
@@ -583,7 +628,10 @@ class TimingToolUI:
         self.root.focus_set()
         
         self.root.title("ALU Timing Tool")
-        self.root.geometry("300x120")  # Compact size when collapsed
+        
+        # Use saved position and size from config
+        geometry = self.config_manager.get_window_geometry_from_config(self.ui_config)
+        self.root.geometry(geometry)
         self.root.resizable(False, False)
         
         # Remove window decorations and make it borderless
@@ -599,9 +647,12 @@ class TimingToolUI:
         # Set up the window style
         self.root.configure(bg="#2c3e50")
         
-        # Pin by default
-        self.is_pinned = True
-        self.root.wm_attributes("-topmost", True)
+        # Set pin state from config
+        self.is_pinned = self.ui_config.get("is_pinned", True)
+        if self.is_pinned:
+            self.root.wm_attributes("-topmost", True)
+        else:
+            self.root.wm_attributes("-topmost", False)
         
         # Create main horizontal container
         main_container = tk.Frame(self.root, bg="#2c3e50")
@@ -673,6 +724,9 @@ class TimingToolUI:
         # Create race panel content
         self._create_race_panel_content()
         
+        # Restore panel states from config
+        self._restore_panel_states_from_config()
+        
         # Start the UI update loop
         self.update_ui()
         
@@ -681,6 +735,24 @@ class TimingToolUI:
         self.root.focus_force()
         
         self.root.mainloop()
+    
+    def _restore_panel_states_from_config(self):
+        """Restore panel states from saved configuration."""
+        try:
+            panels_config = self.ui_config.get("panels", {})
+            
+            # Restore race panel state
+            saved_race_panel_expanded = panels_config.get("race_panel_expanded", False)
+            if saved_race_panel_expanded and not self.race_panel_expanded:
+                self.toggle_race_panel()
+            
+            # Restore debug panel state (only if race panel is expanded)
+            saved_debug_panel_expanded = panels_config.get("debug_panel_expanded", False)
+            if saved_debug_panel_expanded and self.race_panel_expanded and not self.debug_expanded:
+                self.toggle_debug()
+                
+        except Exception as e:
+            print(f"Error restoring panel states: {e}")
     
     def _create_race_panel_content(self):
         """Create the race panel content with 2-column layout."""

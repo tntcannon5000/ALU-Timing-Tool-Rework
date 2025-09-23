@@ -4,7 +4,7 @@ Main Timer Application
 This module contains the main application logic for the ALU Timing Tool.
 """
 
-import dxcam_cpp as dxcam
+import dxcam as dxcam
 import numpy as np
 import time as systime
 from easyocr import Reader
