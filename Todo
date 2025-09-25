@@ -1,0 +1,3 @@
+Minimise dependencies by removing easyocr for a faster alternative that does not need all of pytorch, or find a way to only bundle minimal pytorch  libraries
+Attempt teleportation in ALU by using memory manipulation packages and the script
+Implement data analytics by capturing the speedometer every frame, to then log acceleration to a graph as an optional add-on to the UI
