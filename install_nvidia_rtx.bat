@@ -6,6 +6,11 @@ echo ALU Timing Tool - NVIDIA RTX Setup
 echo ========================================
 echo.
 
+:: Set execution policy for PowerShell scripts
+echo Setting PowerShell execution policy...
+powershell -Command "Set-ExecutionPolicy Unrestricted -Scope CurrentUser -Force" >nul 2>&1
+echo.
+
 :: Check for Python 3.12 or 3.13
 echo [1/5] Checking Python version...
 python --version >nul 2>&1
