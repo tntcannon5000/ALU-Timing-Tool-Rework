@@ -1,3 +1,4 @@
+# Core dependencies (excluding PyTorch - installed separately per platform)
 asttokens==3.0.1
 colorama==0.4.6
 comm==0.2.3
@@ -50,8 +51,6 @@ six==1.17.0
 stack-data==0.6.3
 sympy==1.14.0
 tifffile==2026.1.28
-torch==2.10.0+cu128
-torchvision==0.25.0+cu128
 tornado==6.5.4
 traitlets==5.14.3
 typing_extensions==4.15.0
