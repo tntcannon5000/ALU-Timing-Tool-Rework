@@ -7,7 +7,6 @@ This module contains the main application logic for the ALU Timing Tool.
 import dxcam as dxcam
 import numpy as np
 import time as systime
-from easyocr import Reader
 from typing import Optional, List
 from collections import deque
 
@@ -16,6 +15,7 @@ from src.utils.helpers import (
     pre_process_distbox,
     setup_window_capture
 )
+from src.utils.device import get_easyocr_reader
 from src.modules import (
     TimerRecognizer,
     ImageProcessor,
@@ -61,8 +61,8 @@ class ALUTimingTool:
         self._cached_top_right_region_coords = None  # (y1, y2, x1, x2) for slicing
         self._cached_cnn_roi_fraction = 23 / 40  # Pre-compute fraction for CNN ROI
         
-        # OCR reader
-        self.reader = Reader(['en'], gpu=True)
+        # OCR reader - device-agnostic (auto-detects CUDA/XPU/CPU)
+        self.reader = get_easyocr_reader(['en'])
         
         # State variables
         self.capturing = True
@@ -113,8 +113,8 @@ class ALUTimingTool:
         """Setup window capture and camera."""
         print("Setting up window capture...")
         
-        # Setup window capture
-        coords, self.monitor_id, normalised_coords, aspect_ratio, self.capture_coords = setup_window_capture(self.window_name)
+        # Setup window capture - now returns dxcam_output_idx
+        coords, self.monitor_id, normalised_coords, aspect_ratio, self.capture_coords, dxcam_output_idx = setup_window_capture(self.window_name)
         
         print(f"Window found at: {coords}")
         print(f"Monitor ID: {self.monitor_id}")
@@ -122,9 +122,8 @@ class ALUTimingTool:
         print(f"Aspect ratio: {aspect_ratio}")
         print(f"Capture coords: {self.capture_coords}")
         
-        # Initialize camera
-
-        self.camera = dxcam.create(device_idx=0, output_idx=self.monitor_id)
+        # Initialize camera with correct dxcam output index
+        self.camera = dxcam.create(device_idx=0, output_idx=dxcam_output_idx)
         print("Camera initialized.")
         # Test grab
         window = self.camera.grab()

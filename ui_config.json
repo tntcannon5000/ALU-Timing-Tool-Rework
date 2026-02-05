@@ -1,0 +1,16 @@
+{
+  "window_position": {
+    "x": 2213,
+    "y": 491
+  },
+  "window_size": {
+    "width": 300,
+    "height": 485
+  },
+  "scaling": 1.15,
+  "is_pinned": true,
+  "panels": {
+    "race_panel_expanded": true,
+    "debug_panel_expanded": true
+  }
+}

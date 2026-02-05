@@ -52,10 +52,21 @@ def get_monitor_number_from_coords(coords):
     center_y = (y1 + y2) // 2
 
     monitors = win32api.EnumDisplayMonitors()
+    
+    print(f"\n🔍 Monitor Detection Debug:")
+    print(f"   Window center: ({center_x}, {center_y})")
+    print(f"   Total monitors detected: {len(monitors)}")
+    
     for idx, (handle, hdc, monitor_rect) in enumerate(monitors):
         mx1, my1, mx2, my2 = monitor_rect
+        width = mx2 - mx1
+        height = my2 - my1
+        print(f"   Monitor {idx}: {width}x{height} at ({mx1}, {my1}) to ({mx2}, {my2})")
+        
         if mx1 <= center_x < mx2 and my1 <= center_y < my2:
+            print(f"   ✓ Window is on Monitor {idx}")
             return idx
+    
     raise ValueError("Window is not on any detected monitor.")
 
 def normalise_coords_to_monitor(coords, monitor_number):

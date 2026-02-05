@@ -10,6 +10,13 @@ import time as systime
 from typing import Optional, Tuple, List
 from src.models import get_model, get_default_model_type
 from src.utils.helpers import get_model_path
+from src.utils.device import (
+    get_device,
+    synchronize_device,
+    empty_device_cache,
+    optimize_backends,
+    is_accelerated
+)
 
 
 class CNNPredictor:
@@ -24,7 +31,7 @@ class CNNPredictor:
         Args:
             confidence_threshold: Minimum confidence threshold for predictions
         """
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = get_device()
         self.confidence_threshold = confidence_threshold
         self.model = None
         self.model_name = "unknown"
@@ -90,10 +97,8 @@ class CNNPredictor:
             
             # 🚀 PERFORMANCE OPTIMIZATIONS 🚀
             
-            # 1. Enable cudnn benchmarking for consistent convolution algorithms
-            if self.device.type == 'cuda':
-                torch.backends.cudnn.benchmark = True
-                torch.backends.cudnn.deterministic = False
+            # 1. Configure backend optimizations (CUDA/XPU specific)
+            optimize_backends()
             
             # 2. Disable gradient computation globally
             torch.set_grad_enabled(False)
@@ -113,8 +118,7 @@ class CNNPredictor:
                 pass  # Continue with eager mode
             
             # 4. Set memory allocation strategy
-            if self.device.type == 'cuda':
-                torch.cuda.empty_cache()
+            empty_device_cache()
     
     def predict(self, tensor_image: torch.Tensor) -> Optional[Tuple[int, float]]:
         """
@@ -131,8 +135,8 @@ class CNNPredictor:
             
         try:
             # Start timing - more precise timing
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize()  # Ensure all previous operations are complete
+            if is_accelerated():
+                synchronize_device()  # Ensure all previous operations are complete
             inference_start = systime.perf_counter()
             
             # Reuse tensor cache if possible (optimization)
@@ -147,10 +151,9 @@ class CNNPredictor:
             confidence = torch.softmax(outputs, 1)[0][predicted].item()
             
             # End timing with synchronization
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize()  # Wait for GPU operations to complete
+            if is_accelerated():
+                synchronize_device()  # Wait for GPU operations to complete
             inference_end = systime.perf_counter()
-            
             inference_time = (inference_end - inference_start) * 1000  # Convert to ms
             
             # Update inference time tracking

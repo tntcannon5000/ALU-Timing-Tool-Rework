@@ -166,7 +166,7 @@ def setup_window_capture(window_name: str = "asphalt"):
         window_name: Name of the window to search for
         
     Returns:
-        Tuple of (coords, monitor_id, normalised_coords, aspect_ratio, capture_coords)
+        Tuple of (coords, monitor_id, normalised_coords, aspect_ratio, capture_coords, dxcam_output_idx)
     """
     # Find the window coordinates
     coords = fuzzy_window_search(window_name)
@@ -185,7 +185,101 @@ def setup_window_capture(window_name: str = "asphalt"):
     x1, y1, x2, y2 = normalised_coords
     capture_coords = (x1, y1, x2, int(y1 + (y2 - y1) / 3.4))
     
-    return coords, monitor_id, normalised_coords, aspect_ratio, capture_coords
+    # Get monitor info and map to dxcam index
+    import win32api
+    import dxcam
+    
+    monitors = win32api.EnumDisplayMonitors()
+    monitor_rect = monitors[monitor_id][2]
+    monitor_width = monitor_rect[2] - monitor_rect[0]
+    monitor_height = monitor_rect[3] - monitor_rect[1]
+    
+    # Map win32api monitor to dxcam output_idx by testing actual camera outputs
+    # dxcam and win32api may enumerate monitors in different orders
+    dxcam_output_idx = monitor_id  # Default: assume same order
+    
+    try:
+        import win32api
+        # Get total number of monitors to test
+        total_monitors = len(win32api.EnumDisplayMonitors())
+        
+        print(f"   🔍 Testing dxcam outputs to find {monitor_width}x{monitor_height} monitor...")
+        
+        # Check if target monitor is primary (at origin 0,0)
+        is_primary_monitor = (monitor_rect[0] == 0 and monitor_rect[1] == 0)
+        
+        # Collect all matching resolutions
+        matching_outputs = []
+        
+        # Test each dxcam output_idx to find matching resolution
+        for test_idx in range(total_monitors):
+            try:
+                # Create a temporary camera to test this output
+                test_camera = dxcam.create(device_idx=0, output_idx=test_idx)
+                if test_camera is None:
+                    continue
+                
+                # Grab a test frame to get actual resolution
+                test_frame = test_camera.grab()
+                
+                if test_frame is not None:
+                    cam_height, cam_width = test_frame.shape[:2]
+                    print(f"   - dxcam output_idx {test_idx}: {cam_width}x{cam_height}")
+                    
+                    if cam_width == monitor_width and cam_height == monitor_height:
+                        matching_outputs.append(test_idx)
+                
+                # Clean up test camera
+                del test_camera
+                
+            except Exception as e:
+                # This output_idx might not be valid, continue testing
+                continue
+        
+        # Determine the correct output based on matches
+        if len(matching_outputs) == 1:
+            # Only one monitor with this resolution - use it
+            dxcam_output_idx = matching_outputs[0]
+            if dxcam_output_idx != monitor_id:
+                print(f"   ⚠️  Monitor enumeration order differs!")
+                print(f"   ⚠️  win32api Monitor {monitor_id} -> dxcam output_idx {dxcam_output_idx}")
+            else:
+                print(f"   ✓ Monitor index {dxcam_output_idx} verified (same in both APIs)")
+                
+        elif len(matching_outputs) > 1:
+            # Multiple monitors with same resolution - use position heuristic
+            print(f"   ⚠️  Multiple monitors with {monitor_width}x{monitor_height} found!")
+            
+            if is_primary_monitor:
+                # Primary monitor is usually dxcam output_idx 0
+                dxcam_output_idx = 0
+                print(f"   ✓ Using primary monitor (dxcam output_idx 0)")
+            else:
+                # Secondary monitor - try to find non-zero index
+                non_zero_matches = [idx for idx in matching_outputs if idx != 0]
+                if non_zero_matches:
+                    dxcam_output_idx = non_zero_matches[0]
+                    print(f"   ✓ Using secondary monitor (dxcam output_idx {dxcam_output_idx})")
+                else:
+                    # All matches are index 0? Use first non-primary match or fallback
+                    dxcam_output_idx = matching_outputs[1] if len(matching_outputs) > 1 else matching_outputs[0]
+                    print(f"   ⚠️  Best guess: dxcam output_idx {dxcam_output_idx}")
+        else:
+            # No matches found
+            print(f"   ⚠️  Could not find matching resolution in dxcam outputs")
+            print(f"   ⚠️  Using win32api monitor ID {monitor_id} as fallback")
+            
+    except Exception as e:
+        print(f"   ⚠️  Error during dxcam monitor detection: {e}")
+        print(f"   ⚠️  Using win32api monitor ID {monitor_id} as fallback")
+    
+    print(f"\n📺 Monitor Setup Summary:")
+    print(f"   win32api Monitor ID: {monitor_id}")
+    print(f"   dxcam output_idx: {dxcam_output_idx}")
+    print(f"   Monitor Resolution: {monitor_width}x{monitor_height}")
+    print(f"   Capture Region: {capture_coords}")
+    
+    return coords, monitor_id, normalised_coords, aspect_ratio, capture_coords, dxcam_output_idx
 
 
 def get_asset_path(asset_type: str, filename: str = None) -> str:
