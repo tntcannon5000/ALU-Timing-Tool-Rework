@@ -32,6 +32,7 @@ cd ALU-Timing-Tool-Rework
 
 2. Create virtual environment:
 ```bash
+Set-ExecutionPolicy RemoteSigned
 python -m venv venv
 venv\Scripts\activate  # Windows
 # or
