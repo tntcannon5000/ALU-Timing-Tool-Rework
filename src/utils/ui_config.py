@@ -29,10 +29,6 @@ class UIConfigManager:
             "window_size": {"width": 300, "height": 120},
             "scaling": 1.15,
             "is_pinned": True,
-            "panels": {
-                "race_panel_expanded": False,
-                "debug_panel_expanded": False
-            }
         }
     
     def save_config(self, config: Dict) -> bool:

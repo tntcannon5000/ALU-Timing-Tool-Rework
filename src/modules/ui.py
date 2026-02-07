@@ -86,6 +86,8 @@ class TimingToolUI:
         try:
             if self.root:
                 # Get current window geometry
+                if self.debug_expanded: self.toggle_debug()
+                if self.race_panel_expanded: self.toggle_race_panel()
                 geometry = self.root.geometry()
                 geometry_info = self.config_manager.extract_geometry_from_string(geometry)
                 
@@ -95,10 +97,6 @@ class TimingToolUI:
                     "window_size": geometry_info["window_size"],
                     "scaling": self.current_scaling,
                     "is_pinned": self.is_pinned,
-                    "panels": {
-                        "race_panel_expanded": self.race_panel_expanded,
-                        "debug_panel_expanded": self.debug_expanded
-                    }
                 }
                 
                 # Save to file
@@ -152,6 +150,7 @@ class TimingToolUI:
             width, height, x, y = parts[0], parts[1], parts[2], parts[3]
             new_height = int(height) - panel_height
             self.root.geometry(f"{width}x{new_height}+{x}+{y}")
+            self.root.update()
             # Also collapse debug if race panel is closed
             if self.debug_expanded:
                 # Manually close debug panel (can't use toggle_debug since race panel is closing)
@@ -735,7 +734,7 @@ class TimingToolUI:
         self.root.focus_force()
         
         self.root.mainloop()
-    
+    '''
     def _restore_panel_states_from_config(self):
         """Restore panel states from saved configuration."""
         try:
@@ -753,7 +752,7 @@ class TimingToolUI:
                 
         except Exception as e:
             print(f"Error restoring panel states: {e}")
-    
+    '''
     def _create_race_panel_content(self):
         """Create the race panel content with 2-column layout."""
         if not self.race_panel:
