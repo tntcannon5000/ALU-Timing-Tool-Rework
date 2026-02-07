@@ -9,8 +9,7 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 import sys
 import os
-from ..utils.ui_config import UIConfigManager
-
+from src.utils.ui_config import UIConfigManager
 
 class TimingToolUI:
     """
@@ -85,12 +84,15 @@ class TimingToolUI:
         """Save current UI configuration to file."""
         try:
             if self.root:
+
+                #retract both windows for accurate geometry measurement
+                if self.race_panel_expanded: 
+                    print(self.root.geometry())
+                    self.toggle_race_panel()
+                    print(self.root.geometry())
                 # Get current window geometry
-                if self.debug_expanded: self.toggle_debug()
-                if self.race_panel_expanded: self.toggle_race_panel()
                 geometry = self.root.geometry()
                 geometry_info = self.config_manager.extract_geometry_from_string(geometry)
-                
                 # Update configuration
                 config = {
                     "window_position": geometry_info["window_position"],
@@ -118,19 +120,21 @@ class TimingToolUI:
             self.root.wm_attributes("-topmost", False)
             self.pin_button.config(text="📍", bg="#95a5a6")
     
-    def toggle_race_panel(self):
+    def toggle_race_panel(self,none=None):
         """Toggle race panel visibility."""
         self.race_panel_expanded = not self.race_panel_expanded
         if self.race_panel_expanded:
             self.race_panel.pack(side="bottom", fill="x", padx=0, pady=0)
-            self.race_button.config(text="^", bg="#e67e22")
+            #self.race_button.config(text="^", bg="#e67e22")
             # Show race control indicator in button section (left side)
             self.race_control_indicator.pack(side="left", padx=10, pady=5)
+            self.close_button.pack(side="right", padx=2, pady=2)
+            self.pin_button.pack(side="right", padx=2, pady=2)
             # Ensure debug button is visible when race panel opens (unless debug is expanded)
             if hasattr(self, 'debug_button') and self.debug_button and not self.debug_expanded:
                 self.debug_button.pack(side="right", padx=5, pady=2)
             # Fixed height for race panel (taller than before) - scaled
-            panel_height = int(180 * self.current_scaling) if not self.debug_expanded else int(320 * self.current_scaling)
+            panel_height = int(140 * self.current_scaling) if not self.debug_expanded else int(320 * self.current_scaling)
             # Expand window height to accommodate race panel
             current_geometry = self.root.geometry()
             parts = current_geometry.replace('x', '+').replace('+', ' ').split()
@@ -140,10 +144,12 @@ class TimingToolUI:
         else:
             # Hide race control indicator
             self.race_control_indicator.pack_forget()
+            self.close_button.pack_forget()
+            self.pin_button.pack_forget()
             # Calculate height based on debug panel state - scaled
-            panel_height = int(180 * self.current_scaling) if not self.debug_expanded else int(320 * self.current_scaling)
+            panel_height = int(140 * self.current_scaling) if not self.debug_expanded else int(320 * self.current_scaling)
             self.race_panel.pack_forget()
-            self.race_button.config(text="v", bg="#e67e22")
+            #self.race_button.config(text="v", bg="#e67e22")
             # Collapse window height
             current_geometry = self.root.geometry()
             parts = current_geometry.replace('x', '+').replace('+', ' ').split()
@@ -449,16 +455,20 @@ class TimingToolUI:
         
         # Main delta display (takes up almost entire UI)
         self.main_display_frame = tk.Frame(main_ui_frame, bg="#2c3e50")
-        self.main_display_frame.pack(fill="both", expand=True)
+        self.main_display_frame.pack(fill="both", expand=True,anchor='n')
         
         # Make delta frame draggable
         self.main_display_frame.bind("<Button-1>", self.start_drag)
         self.main_display_frame.bind("<B1-Motion>", self.on_drag)
         
         self.delta_label = tk.Label(self.main_display_frame, text=self.delta_time, 
-                             font=("Helvetica", 55, "bold"), fg="#ecf0f1", bg="#2c3e50")
-        self.delta_label.pack(expand=True, fill="both")
-        
+                             font=("Franklin Gothic Heavy", int(110), "bold"), fg="#ecf0f1", bg="#2c3e50")
+        self.delta_label.pack(expand=True, fill="x",anchor='n')
+
+        # Bind right click to open the race panel
+        self.main_display_frame.bind('<Button-3>',self.toggle_race_panel)
+        self.delta_label.bind('<Button-3>',self.toggle_race_panel)
+
         # Make delta label draggable
         self.delta_label.bind("<Button-1>", self.start_drag)
         self.delta_label.bind("<B1-Motion>", self.on_drag)
@@ -476,27 +486,19 @@ class TimingToolUI:
         button_section.bind("<B1-Motion>", self.on_drag)
         
         # Race Control indicator (bottom left, initially hidden) - bigger and white
-        self.race_control_indicator = tk.Label(button_section, text="Race Control", 
+        self.race_control_indicator = tk.Label(button_section, text="Race Control",
                                               font=("Helvetica", 10, "bold"), fg="white", bg="#2c3e50")
         # Don't pack it initially
         
         # Close button (rightmost)
-        self.close_button = tk.Button(button_section, text="✕", command=self.close_app, 
+        self.close_button = tk.Button(button_section, text="✕", command=self.close_app,
                               bg="#e74c3c", fg="white", font=("Helvetica", 8, "bold"),
                               relief="flat", width=3, height=1)
-        self.close_button.pack(side="right", padx=2, pady=2)
         
         # Pin button (second from right)
         self.pin_button = tk.Button(button_section, text="📌", command=self.toggle_pin, 
                               bg="#4ecdc4", fg="white", font=("Helvetica", 8, "bold"),
                               relief="flat", width=3, height=1)
-        self.pin_button.pack(side="right", padx=2, pady=2)
-        
-        # Race panel toggle button (third from right)
-        self.race_button = tk.Button(button_section, text="v", command=self.toggle_race_panel, 
-                              bg="#e67e22", fg="white", font=("Helvetica", 8, "bold"),
-                              relief="flat", width=3, height=1)
-        self.race_button.pack(side="right", padx=2, pady=2)
         
         # Race panel (initially hidden, below main UI)
         self.race_panel = tk.Frame(self.root, bg="#2c3e50", height=150)
@@ -582,7 +584,7 @@ class TimingToolUI:
                 self.delta_label.config(text=self.delta_time)
             else:
                 # Show placeholder when recording
-                self.delta_label.config(text="--.---")
+                self.delta_label.config(text="=0.00")
             
             # Update debug info only if expanded
             if self.debug_expanded:
@@ -667,19 +669,25 @@ class TimingToolUI:
         
         # Main delta display (takes up almost entire UI)
         self.main_display_frame = tk.Frame(main_ui_frame, bg="#2c3e50")
-        self.main_display_frame.pack(fill="both", expand=True)
+        self.main_display_frame.pack(fill="both", expand=True,anchor='n')
         
         # Make delta frame draggable
         self.main_display_frame.bind("<Button-1>", self.start_drag)
         self.main_display_frame.bind("<B1-Motion>", self.on_drag)
         
         self.delta_label = tk.Label(self.main_display_frame, text=self.delta_time, 
-                             font=("Helvetica", 55, "bold"), fg="#ecf0f1", bg="#2c3e50")
-        self.delta_label.pack(expand=True, fill="both")
+                                    font=("Franklin Gothic Heavy", int(110), "bold"), fg="#ecf0f1", bg="#2c3e50")
+        self.delta_label.pack(expand=True, fill="x",anchor='n')
+        
+        # Bind right click to open the race panel
+        self.main_display_frame.bind('<Button-3>',self.toggle_race_panel)
+        self.delta_label.bind('<Button-3>',self.toggle_race_panel)
         
         # Make delta label draggable
         self.delta_label.bind("<Button-1>", self.start_drag)
         self.delta_label.bind("<B1-Motion>", self.on_drag)
+
+        
         
         # Bottom button section (compact)
         button_section = tk.Frame(main_ui_frame, bg="#2c3e50", height=30)
@@ -702,19 +710,13 @@ class TimingToolUI:
         self.close_button = tk.Button(button_section, text="✕", command=self.close_app, 
                               bg="#e74c3c", fg="white", font=("Helvetica", 8, "bold"),
                               relief="flat", width=3, height=1)
-        self.close_button.pack(side="right", padx=2, pady=2)
+        #self.close_button.pack(side="right", padx=2, pady=2)
         
         # Pin button (second from right)
         self.pin_button = tk.Button(button_section, text="📌", command=self.toggle_pin, 
                               bg="#4ecdc4", fg="white", font=("Helvetica", 8, "bold"),
                               relief="flat", width=3, height=1)
-        self.pin_button.pack(side="right", padx=2, pady=2)
-        
-        # Race panel toggle button (third from right)
-        self.race_button = tk.Button(button_section, text="v", command=self.toggle_race_panel, 
-                              bg="#e67e22", fg="white", font=("Helvetica", 8, "bold"),
-                              relief="flat", width=3, height=1)
-        self.race_button.pack(side="right", padx=2, pady=2)
+        #self.pin_button.pack(side="right", padx=2, pady=2)
         
         # Race panel (initially hidden, below main UI)
         self.race_panel = tk.Frame(self.root, bg="#2c3e50", height=150)
@@ -734,7 +736,7 @@ class TimingToolUI:
         self.root.focus_force()
         
         self.root.mainloop()
-    '''
+    
     def _restore_panel_states_from_config(self):
         """Restore panel states from saved configuration."""
         try:
@@ -752,7 +754,7 @@ class TimingToolUI:
                 
         except Exception as e:
             print(f"Error restoring panel states: {e}")
-    '''
+    
     def _create_race_panel_content(self):
         """Create the race panel content with 2-column layout."""
         if not self.race_panel:
