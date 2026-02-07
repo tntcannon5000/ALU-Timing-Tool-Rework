@@ -4,4 +4,5 @@ Implement data analytics by capturing the speedometer every frame, to then log a
 Implement save splicing and merging automatically in a 3rd mode called "splits" - autosaves PB splits, merges them into spliced ghost, and saves PB ghost as well (but prompts user as usual)
 Add additional optional UI during the race to show comparison to splits and also an option to race against "best possible time" ghost instead (and also configuration of "checkpoints" in the menu)
 Make a built-in function to convert ghosts from Bholla's file format to the JSON format, runs automatically if it detects a Bholla save file has been selected
-Fix UI bug where the window opens in the "race menu extended" size but without the race menu visible (make race menu extended as the startup config, no reason to have it be hidden on launch)
+Detection system: run % change detection --> found % change --> start clock --> read % with CNN --> run detection on igt --> found time change --> stop clock --> read timer with CNN --> save % time as CNN_time - clock_delta
+(for above, "read % with CNN" can be moved to after "stop clock" for slightly more reliable performance)
