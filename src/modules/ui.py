@@ -6,6 +6,7 @@ This module handles the GUI for the ALU Timing Tool.
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import shutil
 import threading
 import sys
 import os
@@ -55,6 +56,10 @@ class TimingToolUI:
         self.mode_var = None
         self.mode_combobox = None
         self.load_ghost_button = None
+        # Split view elements
+        self.split_view_frame = None
+        self.split_view_visible = False
+        self.toggle_split_view_button = None
         
         # Data to display
         self.current_timer_display = "00:00.000"
@@ -110,6 +115,53 @@ class TimingToolUI:
         except Exception as e:
             print(f"Error saving UI configuration: {e}")
     
+    def _get_base_height(self):
+        """Get the base height of just the delta display."""
+        self.main_display_frame.config(height=int(120 * self.current_scaling))
+        return int(120 * self.current_scaling)
+    
+    def _get_split_view_height(self):
+        """Calculate split view height if visible."""
+        if not self.split_view_visible or not self.race_data_manager:
+            return 0
+        try:
+            splits = self.race_data_manager.splits
+            if splits:
+                return max(60, int(len(splits) * 30 * self.current_scaling))
+        except Exception:
+            pass
+        return 0
+    
+    def _get_race_panel_height(self):
+        """Get race panel height (includes debug if expanded)."""
+        if not self.race_panel_expanded:
+            return 0
+        base = int(170 * self.current_scaling)
+        if self.debug_expanded:
+            debug_height = int(100 * self.current_scaling)
+            return base + debug_height
+        return base
+    
+    def _calculate_total_height(self):
+        """Calculate total window height based on visible panels."""
+        total = self._get_base_height()
+        total += self._get_split_view_height()
+        total += self._get_race_panel_height()
+        return total
+    
+    def _update_window_height(self):
+        """Update window height based on current panel states."""
+        if not self.root:
+            return
+        current_geometry = self.root.geometry()
+        parts = current_geometry.replace('x', '+').replace('+', ' ').split()
+        width = parts[0]
+        x = parts[2]
+        y = parts[3]
+        new_height = self._calculate_total_height()
+        self.root.geometry(f"{width}x{new_height}+{x}+{y}")
+        self.root.update()
+
     def toggle_pin(self):
         """Toggle window pin state."""
         self.is_pinned = not self.is_pinned
@@ -124,46 +176,25 @@ class TimingToolUI:
         """Toggle race panel visibility."""
         self.race_panel_expanded = not self.race_panel_expanded
         if self.race_panel_expanded:
-            # Fixed height for race panel (taller than before) - scaled
-            panel_height = int(140 * self.current_scaling) if not self.debug_expanded else int(230 * self.current_scaling)
-            # Expand window height to accommodate race panel
-            current_geometry = self.root.geometry()
-            parts = current_geometry.replace('x', '+').replace('+', ' ').split()
-            width, height, x, y = parts[0], parts[1], parts[2], parts[3]
-            new_height = int(height) + panel_height
-            print('start',new_height)
-            self.root.update()
-            self.root.geometry(f"{width}x{new_height}+{x}+{y}")
-            self.main_display_frame.config(height=int(height),width=int(width))
-            self.root.update()
-            self.race_panel.pack(side="top", fill="x",expand=False, padx=int(0 * self.current_scaling), pady=int(0 * self.current_scaling))
+            # Pack race panel (below main_ui_frame in main_container)
+            self.race_panel.pack(side="top", fill="x", expand=False, padx=int(0 * self.current_scaling), pady=int(0 * self.current_scaling))
             self.race_panel.pack_propagate(True)
             # Ensure debug button is visible when race panel opens (unless debug is expanded)
             if hasattr(self, 'debug_button') and self.debug_button and not self.debug_expanded:
                 self.debug_button.pack(padx=int(5 * self.current_scaling), pady=int(0 * self.current_scaling))
         else:
-            # Calculate height based on debug panel state - scaled
-            panel_height = int(140 * self.current_scaling) if not self.debug_expanded else int(230 * self.current_scaling)
+            # Unpack race panel
             self.race_panel.pack_forget()
-            # Collapse window height
-            current_geometry = self.root.geometry()
-            parts = current_geometry.replace('x', '+').replace('+', ' ').split()
-            width, height, x, y = parts[0], parts[1], parts[2], parts[3]
-            new_height = int(height) - panel_height
-            self.root.geometry(f"{width}x{new_height}+{x}+{y}")
-            self.root.update()
             # Also collapse debug if race panel is closed
             if self.debug_expanded:
-                # Manually close debug panel (can't use toggle_debug since race panel is closing)
                 self.debug_frame.pack_forget()
                 self.debug_expanded = False
-                # Adjust height calculation to account for debug panel being closed
-                #panel_height += int(140 * self.current_scaling)  # Add debug panel height to total reduction
-            
-            # Ensure debug button is visible for next time race panel opens
+            # Ensure debug button is hidden
             if hasattr(self, 'debug_button') and self.debug_button:
-                self.debug_button.pack_forget()  # Remove it first
-                # It will be re-packed when race panel opens again
+                self.debug_button.pack_forget()
+        
+        # Recalculate window height
+        self._update_window_height()
     
     def on_mode_changed(self, event=None):
         """Handle mode change."""
@@ -179,6 +210,12 @@ class TimingToolUI:
         elif mode == "splits":
             self.load_ghost_button.config(state="normal", bg="#3498db", text="Load Split Race Ghost", command=self.load_split_file)
             self.configure_splits_button.config(state="normal", bg="#8e44ad")
+            # Only enable toggle if a splits configuration exists
+            if hasattr(self, 'toggle_split_view_button') and self.toggle_split_view_button:
+                if self.race_data_manager and getattr(self.race_data_manager, 'splits', None):
+                    self.toggle_split_view_button.config(state="normal", bg="#8e44ad")
+                else:
+                    self.toggle_split_view_button.config(state="disabled", bg="#7f8c8d")
 
         if self.on_mode_change:
             self.on_mode_change(mode)
@@ -310,6 +347,37 @@ class TimingToolUI:
                     messagebox.showerror("Error", "Failed to normalize splits")
                     return
                 self.race_data_manager.splits = normalized
+                # After configuring splits, enable toggle split view button
+                if hasattr(self, 'toggle_split_view_button') and self.toggle_split_view_button:
+                    self.toggle_split_view_button.config(state="normal", bg="#8e44ad")
+
+            # If a split file is already loaded, back it up before overwriting
+            if (self.race_data_manager and getattr(self.race_data_manager, 'is_split_loaded', False)
+                    and getattr(self.race_data_manager, 'split_filepath', None)):
+                try:
+                    orig = self.race_data_manager.split_filepath
+                    d, fname = os.path.split(orig)
+                    base, ext = os.path.splitext(fname)
+                    n = 0
+                    while True:
+                        if n == 0:
+                            candidate = os.path.join(d, f"{base} backup{ext}")
+                        else:
+                            candidate = os.path.join(d, f"{base} backup {n}{ext}")
+                        if not os.path.exists(candidate):
+                            break
+                        n += 1
+                    shutil.copy(orig, candidate)
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to create backup: {e}")
+                    return
+
+                # Save updated split configuration back to the original file
+                if hasattr(self.race_data_manager, 'save_split_data'):
+                    saved = self.race_data_manager.save_split_data()
+                    if not saved:
+                        messagebox.showerror("Error", "Failed to save updated split file")
+                        return
 
             if hasattr(self, 'on_configure_splits') and self.on_configure_splits:
                 self.on_configure_splits(normalized if normalized is not None else splits_list)
@@ -320,6 +388,118 @@ class TimingToolUI:
         tk.Button(btn_frame, text="Cancel", command=dialog.destroy, bg="#e74c3c", fg="white", width=10).pack(side="left", padx=int(6 * self.current_scaling))
 
         dialog.focus_set()
+
+    def toggle_split_view(self):
+        """Toggle the split comparison view visibility."""
+        self.split_view_visible = not self.split_view_visible
+        if self.split_view_visible:
+            # Create frame if missing
+            if not self.split_view_frame:
+                self.split_view_frame = tk.Frame(self.root, bg="#222f3e")
+            # Pack split view below delta display, independently of race panel
+            self.split_view_frame.pack(side="top", fill="x", expand=False, padx=int(0 * self.current_scaling), pady=(int(4 * self.current_scaling), 0))
+            self.update_split_view()
+        else:
+            if self.split_view_frame:
+                self.split_view_frame.pack_forget()
+        
+        # Recalculate window height
+        self._update_window_height()
+
+    def _format_time_ms(self, ms_str: str) -> str:
+        try:
+            if not ms_str or ms_str == "0000000":
+                return "--:--.---"
+            ms = int(ms_str)
+            seconds = ms / 1000.0
+            m = int(seconds // 60)
+            s = seconds - (m * 60)
+            return f"{m}:{s:06.3f}"
+        except Exception:
+            return "--:--.---"
+
+    def _format_delta_ms(self, delta_ms: int) -> str:
+        try:
+            if delta_ms is None:
+                return ""
+            sign = '-' if delta_ms < 0 else '+'
+            s = abs(delta_ms) / 1000.0
+            return f"{sign}{s:0.2f}"
+        except Exception:
+            return ""
+
+    def update_split_view(self):
+        """Rebuild the split comparison view from current split data."""
+        if not self.split_view_frame:
+            self.split_view_frame = tk.Frame(self.root, bg="#222f3e")
+
+        # Clear old widgets
+        for w in self.split_view_frame.winfo_children():
+            w.destroy()
+
+        splits = None
+        if self.race_data_manager and hasattr(self.race_data_manager, 'get_splits'):
+            splits = self.race_data_manager.get_splits()
+
+        if not splits:
+            lbl = tk.Label(self.split_view_frame, text="No splits configured", bg="#222f3e", fg="white")
+            lbl.pack(padx=int(8 * self.current_scaling), pady=int(4 * self.current_scaling))
+            return
+
+        # Determine if we have live current race data (any non-zero entry)
+        has_live = False
+        try:
+            for v in (self.race_data_manager.current_race_data.values() if hasattr(self.race_data_manager, 'current_race_data') else []):
+                if v != "0000000":
+                    has_live = True
+                    break
+        except Exception:
+            has_live = False
+
+        # Adjust size based on number of splits
+        count = len(splits)
+        font_size = max(8, int(10 * self.current_scaling))
+
+        for s in splits:
+            name = s.get('name', 'split')
+            percent = s.get('percent', 0)
+
+            # Get ghost time at this percent
+            ghost_time = None
+            if getattr(self.race_data_manager, 'split_times', None):
+                ghost_time = self.race_data_manager.split_times.get(str(percent), "0000000")
+
+            # If we don't have live data yet, show placeholders with names and percents
+            if not has_live:
+                row = tk.Frame(self.split_view_frame, bg="#222f3e")
+                row.pack(fill='x', padx=int(8 * self.current_scaling), pady=(int(2 * self.current_scaling), int(2 * self.current_scaling)))
+                name_lbl = tk.Label(row, text=name, bg="#222f3e", fg="white", anchor='w', width=20, font=("Helvetica", font_size))
+                name_lbl.pack(side='left')
+                # Placeholder delta
+                delta_lbl = tk.Label(row, text="--.--", bg="#222f3e", fg="#bdc3c7", width=8, font=("Helvetica", font_size))
+                delta_lbl.pack(side='left')
+                # Show percent on right
+                pct_lbl = tk.Label(row, text=f"{percent}%", bg="#222f3e", fg="#bdc3c7", anchor='e', width=8, font=("Helvetica", font_size))
+                pct_lbl.pack(side='right')
+            else:
+                current_time = self.race_data_manager.current_race_data.get(str(percent), "0000000") if hasattr(self.race_data_manager, 'current_race_data') else "0000000"
+                # Compute delta if possible
+                delta_display = ""
+                try:
+                    if current_time and ghost_time and current_time != "0000000" and ghost_time != "0000000":
+                        delta_ms = int(current_time) - int(ghost_time)
+                        delta_display = self._format_delta_ms(delta_ms)
+                except Exception:
+                    delta_display = ""
+
+                row = tk.Frame(self.split_view_frame, bg="#222f3e")
+                row.pack(fill='x', padx=int(8 * self.current_scaling), pady=(int(2 * self.current_scaling), int(2 * self.current_scaling)))
+                name_lbl = tk.Label(row, text=name, bg="#222f3e", fg="white", anchor='w', width=20, font=("Helvetica", font_size))
+                name_lbl.pack(side='left')
+                delta_lbl = tk.Label(row, text=delta_display, bg="#222f3e", fg="#2ecc71" if delta_display and delta_display.startswith('-') else "#e74c3c", width=8, font=("Helvetica", font_size))
+                delta_lbl.pack(side='left')
+                time_lbl = tk.Label(row, text=self._format_time_ms(ghost_time), bg="#222f3e", fg="#bdc3c7", anchor='e', width=12, font=("Helvetica", font_size))
+                time_lbl.pack(side='right')
     
     def save_ghost_file(self):
         """Open file dialog to save current race data as ghost file."""
@@ -524,6 +704,9 @@ class TimingToolUI:
             # Restore window position
             self.root.geometry(f"+{x}+{y}")
             
+            # Recalculate window height to ensure all panels are properly sized
+            self._update_window_height()
+            
             print(f"Scaling adjusted to: {self.current_scaling:.2f}, Window size: {new_width}x{new_height}")
         except tk.TclError as e:
             print(f"Error adjusting scaling: {e}")
@@ -568,7 +751,7 @@ class TimingToolUI:
         
         # Main UI container (center)
         main_ui_frame = tk.Frame(main_container, bg="#2c3e50")
-        main_ui_frame.pack(side="left", fill="both", expand=True)
+        main_ui_frame.pack(side="top", fill="both", expand=False)
         
         # Bind drag events to main frame for window movement
         main_ui_frame.bind("<Button-1>", self.start_drag)
@@ -586,6 +769,8 @@ class TimingToolUI:
                                     font=("Franklin Gothic Heavy", int(110), "bold"), fg="#ecf0f1", bg="#2c3e50")
         self.delta_label.pack(side='top',anchor='n',fill='x',expand=False)
 
+        self.main_display_frame.config(height=int(120 * self.current_scaling))
+
         # Bind right click to open the race panel
         self.main_display_frame.bind('<Button-3>',self.toggle_race_panel)
         self.delta_label.bind('<Button-3>',self.toggle_race_panel)
@@ -594,8 +779,8 @@ class TimingToolUI:
         self.delta_label.bind("<Button-1>", self.start_drag)
         self.delta_label.bind("<B1-Motion>", self.on_drag)
         
-        # Race panel (initially hidden, below main UI)
-        self.race_panel = tk.Frame(self.root, bg="#2c3e50", height=20*self.current_scaling)
+        # Race panel (initially hidden, packed into main_container below button panel)
+        self.race_panel = tk.Frame(main_container, bg="#2c3e50")
         # Don't pack it initially
         
         # Create race panel content
@@ -634,27 +819,18 @@ class TimingToolUI:
             
         self.debug_expanded = not self.debug_expanded
         if self.debug_expanded:
+            # Pack debug frame
             self.debug_frame.pack(side="top", fill="x", padx=int(0 * self.current_scaling), pady=(int(0 * self.current_scaling), int(0 * self.current_scaling)))
             # Hide the debug button when panel is open
             self.debug_button.pack_forget()
-            # Expand window height for debug section (fixed height) - scaled
-            current_geometry = self.root.geometry()
-            parts = current_geometry.replace('x', '+').replace('+', ' ').split()
-            width, height, x, y = parts[0], parts[1], parts[2], parts[3]
-            new_height = int(height) + int(42+45 * self.current_scaling)  # Add scaled debug section height
-            self.root.geometry(f"{width}x{new_height}+{x}+{y}")
-            self.root.update()
         else:
+            # Unpack debug frame
             self.debug_frame.pack_forget()
             # Show the debug button again when panel is closed
-            self.debug_button.pack(side="right", padx=int(5 * self.current_scaling), pady=int(2 * self.current_scaling))
-            # Collapse window height - scaled
-            current_geometry = self.root.geometry()
-            parts = current_geometry.replace('x', '+').replace('+', ' ').split()
-            width, height, x, y = parts[0], parts[1], parts[2], parts[3]
-            new_height = int(height) - int(42+45 * self.current_scaling)  # Remove scaled debug section height
-            self.root.geometry(f"{width}x{new_height}+{x}+{y}")
-            self.root.update()
+            self.debug_button.pack(side="left", padx=int(5 * self.current_scaling), pady=(int(2 * self.current_scaling), int(0 * self.current_scaling)))
+        
+        # Recalculate window height
+        self._update_window_height()
     
     def start_drag(self, event):
         """Start window drag."""
@@ -757,7 +933,7 @@ class TimingToolUI:
         
         # Main UI container (center)
         main_ui_frame = tk.Frame(main_container, bg="#2c3e50")
-        main_ui_frame.pack(side="left", fill="both", expand=True)
+        main_ui_frame.pack(side="top", fill="both", expand=False)
         
         # Bind drag events to main frame for window movement
         main_ui_frame.bind("<Button-1>", self.start_drag)
@@ -775,6 +951,9 @@ class TimingToolUI:
                                     font=("Franklin Gothic Heavy", int(110), "bold"), fg="#ecf0f1", bg="#2c3e50")
         self.delta_label.pack(side='top',anchor='n',fill='x',expand=False)
         
+
+        self.main_display_frame.config(height=int(120 * self.current_scaling))
+
         # Bind right click to open the race panel
         self.main_display_frame.bind('<Button-3>',self.toggle_race_panel)
         self.delta_label.bind('<Button-3>',self.toggle_race_panel)
@@ -783,8 +962,9 @@ class TimingToolUI:
         self.delta_label.bind("<Button-1>", self.start_drag)
         self.delta_label.bind("<B1-Motion>", self.on_drag)
         
-        # Race panel (initially hidden, below main UI)
-        self.race_panel = tk.Frame(self.root, bg="#2c3e50")
+        
+        # Race panel (initially hidden, packed into main_container below button panel)
+        self.race_panel = tk.Frame(main_container, bg="#2c3e50")
         # Don't pack it initially
         
         # Create race panel content
@@ -839,10 +1019,24 @@ class TimingToolUI:
         self.mode_combobox.pack(anchor="w", pady=(int(2 * self.current_scaling), int(0 * self.current_scaling)))
         self.mode_combobox.bind('<<ComboboxSelected>>', self.on_mode_changed)
         
+        
+        # Toggle split view button (always visible, independent of race panel)
+        self.toggle_split_view_button = tk.Button(left_column, text="Toggle Split View",
+                     command=self.toggle_split_view,
+                     bg="#7f8c8d", fg="white", font=("Helvetica", 9),
+                     relief="flat", width=18, state="disabled")
+        self.toggle_split_view_button.pack(pady=(int(0 * self.current_scaling), int(4 * self.current_scaling)))
+
         # Right column - Action buttons and status
         right_column = tk.Frame(main_container, bg="#2c3e50")
         right_column.pack(side="right", fill="both", expand=True)
         
+        # Configure splits button (enabled only in 'splits' mode)
+        self.configure_splits_button = tk.Button(right_column, text="Configure Splits",
+                             command=self.open_configure_splits_dialog,
+                             bg="#7f8c8d", fg="white", font=("Helvetica", 9),
+                             relief="flat", width=18, state="disabled")
+        self.configure_splits_button.pack(pady=(int(4 * self.current_scaling), int(4 * self.current_scaling)))
 
         # Close button (rightmost)
         self.close_button = tk.Button(right_column, text="Close Timing Tool", command=self.close_app, 
@@ -871,20 +1065,16 @@ class TimingToolUI:
                                               relief="flat", width=18, state="disabled")
             self.save_ghost_button.pack(pady=(int(0 * self.current_scaling), int(10 * self.current_scaling)))
         
-        # Configure splits button (enabled only in 'splits' mode)
-        self.configure_splits_button = tk.Button(right_column, text="Configure Splits",
-                             command=self.open_configure_splits_dialog,
-                             bg="#7f8c8d", fg="white", font=("Helvetica", 9),
-                             relief="flat", width=18, state="disabled")
-        self.configure_splits_button.pack(pady=(int(0 * self.current_scaling), int(10 * self.current_scaling)))
+        # Button container at bottom of left column - only for debug button
+        button_container = tk.Frame(left_column, bg="#2c3e50")
+        button_container.pack(fill="x", pady=(int(4 * self.current_scaling), int(0 * self.current_scaling)))
         
-        
-        # Debug button in bottom right instead of status text
-        self.debug_button = tk.Button(left_column, text="Open Debug Panel", font=("Helvetica", 8, "bold"),
+        # Debug button
+        self.debug_button = tk.Button(button_container, text="Open Debug Panel", font=("Helvetica", 8, "bold"),
                          bg="#3498db", fg="white", width=18, height=1,
                          command=self.toggle_debug,
                          relief="flat", bd=1)
-        self.debug_button.pack(side="left", padx=int(5 * self.current_scaling), pady=(int(2 * self.current_scaling), int(0 * self.current_scaling)))
+        self.debug_button.pack(fill="x", padx=int(0 * self.current_scaling), pady=int(0 * self.current_scaling))
         
         # Debug panel (initially hidden, will be packed below when expanded)
         self.debug_frame = tk.Frame(self.race_panel, bg="#2c3e50",height=120*self.current_scaling)

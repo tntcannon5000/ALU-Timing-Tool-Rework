@@ -19,6 +19,7 @@ class RaceDataManager:
         self.current_race_data: Dict[str, int] = {}
         self.ghost_data: Optional[Dict[str, int]] = None
         self.ghost_filename: Optional[str] = None
+        self.split_filepath: Optional[str] = None
         # Split-file related data
         self.splits: Optional[list] = None  # normalized list of {'name':str,'percent':int}
         self.split_times: Optional[Dict[str, int]] = None
@@ -436,6 +437,7 @@ class RaceDataManager:
             self.split_times = data['split_times'].copy()
             self.splits = self._normalize_splits(data['splits'])
             self.ghost_filename = os.path.splitext(os.path.basename(filepath))[0]
+            self.split_filepath = filepath
             self.is_split_loaded = True
             return True
         except Exception as e:
@@ -449,6 +451,32 @@ class RaceDataManager:
     def get_splits(self) -> Optional[list]:
         """Return normalized splits list or None."""
         return self.splits
+
+    def save_split_data(self, filepath: Optional[str] = None) -> bool:
+        """
+        Save the current split ghost back to JSON. If filepath is None, uses the
+        last-loaded split filepath. Returns True on success.
+        """
+        try:
+            target = filepath if filepath else self.split_filepath
+            if not target:
+                print("No target filepath provided to save split data")
+                return False
+
+            data = {
+                "fingerprint": "ALU_TOOL",
+                "times": self.ghost_data if self.ghost_data is not None else self.current_race_data.copy(),
+                "splits": self.splits if self.splits is not None else [],
+                "split_times": self.split_times if self.split_times is not None else {}
+            }
+
+            with open(target, 'w') as f:
+                json.dump(data, f, indent=2)
+
+            return True
+        except Exception as e:
+            print(f"Error saving split data: {e}")
+            return False
 
     def update_split_times_with_current_race(self) -> bool:
         """

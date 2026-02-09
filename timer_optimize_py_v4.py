@@ -235,6 +235,17 @@ class ALUTimingTool:
             filename = self.race_data_manager.get_ghost_filename()
             self.ui.update_ghost_filename(filename)
             print(f"Loaded split ghost: {filename}")
+            # Update UI split view if visible
+            try:
+                self.ui.update_split_view()
+            except Exception:
+                pass
+            # Enable toggle button now that a split file is loaded
+            try:
+                if hasattr(self.ui, 'toggle_split_view_button') and self.ui.toggle_split_view_button:
+                    self.ui.toggle_split_view_button.config(state="normal", bg="#8e44ad")
+            except Exception:
+                pass
         else:
             self.ui.show_message("Error", "Failed to load split file. Please check the file format.", is_error=True)
 
@@ -244,6 +255,11 @@ class ALUTimingTool:
             # Ensure race_data_manager has splits set (UI already sets it if possible)
             if hasattr(self.race_data_manager, 'splits'):
                 self.race_data_manager.splits = normalized_splits
+                # After configuring splits, update UI view
+                try:
+                    self.ui.update_split_view()
+                except Exception:
+                    pass
             print(f"Configured {len(normalized_splits)} splits")
     
     def _on_load_ghost(self, filepath: str):
