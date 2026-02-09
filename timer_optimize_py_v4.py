@@ -101,6 +101,8 @@ class ALUTimingTool:
         self.ui.set_callbacks(
             on_mode_change=self._on_mode_change,
             on_load_ghost=self._on_load_ghost,
+            on_load_split=self._on_load_split,
+            on_configure_splits=self._on_configure_splits,
             on_save_ghost=self._on_save_ghost,
             on_save_race=self._on_save_race,
             on_close=self._shutdown_all_threads
@@ -225,6 +227,24 @@ class ALUTimingTool:
         """Handle race mode change."""
         print(f"Race mode changed to: {mode}")
         # Allow switching to race mode without ghost - user can load ghost later
+
+    def _on_load_split(self, filepath: str):
+        """Handle loading a split-type ghost file."""
+        success = self.race_data_manager.load_split_data(filepath)
+        if success:
+            filename = self.race_data_manager.get_ghost_filename()
+            self.ui.update_ghost_filename(filename)
+            print(f"Loaded split ghost: {filename}")
+        else:
+            self.ui.show_message("Error", "Failed to load split file. Please check the file format.", is_error=True)
+
+    def _on_configure_splits(self, normalized_splits):
+        """Handle configured splits from UI dialog."""
+        if normalized_splits and isinstance(normalized_splits, list):
+            # Ensure race_data_manager has splits set (UI already sets it if possible)
+            if hasattr(self.race_data_manager, 'splits'):
+                self.race_data_manager.splits = normalized_splits
+            print(f"Configured {len(normalized_splits)} splits")
     
     def _on_load_ghost(self, filepath: str):
         """Handle loading a ghost file."""

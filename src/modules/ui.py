@@ -9,8 +9,8 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 import sys
 import os
-from src.utils.ui_config import UIConfigManager
-#from ui_config import UIConfigManager
+#from src.utils.ui_config import UIConfigManager
+from ui_config import UIConfigManager
 class TimingToolUI:
     """
     Main UI class for the ALU Timing Tool.
@@ -168,13 +168,18 @@ class TimingToolUI:
     def on_mode_changed(self, event=None):
         """Handle mode change."""
         mode = self.mode_var.get()
-        
-        # Enable/disable load ghost button based on mode
+
+        # Update load button and configure button depending on mode
         if mode == "record":
-            self.load_ghost_button.config(state="disabled", bg="#7f8c8d")
-        else:  # race mode
-            self.load_ghost_button.config(state="normal", bg="#3498db")
-        
+            self.load_ghost_button.config(state="disabled", bg="#7f8c8d", text="Load Race Ghost", command=self.load_ghost_file)
+            self.configure_splits_button.config(state="disabled", bg="#7f8c8d")
+        elif mode == "race":
+            self.load_ghost_button.config(state="normal", bg="#3498db", text="Load Race Ghost", command=self.load_ghost_file)
+            self.configure_splits_button.config(state="disabled", bg="#7f8c8d")
+        elif mode == "splits":
+            self.load_ghost_button.config(state="normal", bg="#3498db", text="Load Split Race Ghost", command=self.load_split_file)
+            self.configure_splits_button.config(state="normal", bg="#8e44ad")
+
         if self.on_mode_change:
             self.on_mode_change(mode)
     
@@ -189,6 +194,132 @@ class TimingToolUI:
             )
             if filename:
                 self.on_load_ghost(filename)
+
+    def load_split_file(self):
+        """Open file dialog to load a split-type ghost file."""
+        if hasattr(self, 'on_load_split') and self.on_load_split:
+            filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
+            filename = filedialog.askopenfilename(
+                title="Load Split Race Ghost",
+                filetypes=filetypes,
+                initialdir=os.getcwd()
+            )
+            if filename:
+                self.on_load_split(filename)
+
+    def open_configure_splits_dialog(self):
+        """Open a dialog allowing the user to configure split names and percentages."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Configure Splits")
+        dialog.geometry("480x420")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg="#34495e")
+
+        # Number of splits selector
+        tk.Label(dialog, text="Number of splits (2-10):", bg="#34495e", fg="white").pack(pady=(int(8 * self.current_scaling), int(4 * self.current_scaling)))
+        initial_count = 2
+        if self.race_data_manager and getattr(self.race_data_manager, 'splits', None):
+            initial_count = len(self.race_data_manager.splits)
+        count_var = tk.IntVar(value=initial_count)
+        count_spin = tk.Spinbox(dialog, from_=2, to=10, textvariable=count_var, width=5)
+        count_spin.pack(pady=(0, int(6 * self.current_scaling)))
+
+        rows_frame = tk.Frame(dialog, bg="#34495e")
+        rows_frame.pack(fill="both", expand=True, padx=int(8 * self.current_scaling), pady=int(4 * self.current_scaling))
+
+        entry_widgets = []
+
+        def build_rows():
+            for w in rows_frame.winfo_children():
+                w.destroy()
+            entry_widgets.clear()
+
+            n = max(2, min(10, int(count_var.get())))
+            existing = []
+            if self.race_data_manager and getattr(self.race_data_manager, 'splits', None):
+                existing = self.race_data_manager.splits
+
+            for i in range(n):
+                frame = tk.Frame(rows_frame, bg="#34495e")
+                frame.pack(fill="x", pady=(int(2 * self.current_scaling), int(2 * self.current_scaling)))
+                tk.Label(frame, text=f"Split {i+1} name:", bg="#34495e", fg="white").pack(side="left")
+                name_var = tk.StringVar(value=(existing[i]['name'] if i < len(existing) else f"split_{i+1}"))
+                name_entry = tk.Entry(frame, textvariable=name_var, width=18)
+                name_entry.pack(side="left", padx=int(6 * self.current_scaling))
+                tk.Label(frame, text="Percent:", bg="#34495e", fg="white").pack(side="left")
+                # Last split is hardcoded to 99% and should be shown as non-interactive "End"
+                if i == n - 1:
+                    percent_var = tk.IntVar(value=99)
+                    end_label = tk.Label(frame, text="End", bg="#34495e", fg="#ecf0f1", width=5)
+                    end_label.pack(side="left", padx=int(6 * self.current_scaling))
+                else:
+                    default_percent = (existing[i]['percent'] if i < len(existing) else int(((i+1)/n)*99))
+                    percent_var = tk.IntVar(value=default_percent)
+                    percent_entry = tk.Spinbox(frame, from_=1, to=98, textvariable=percent_var, width=5)
+                    percent_entry.pack(side="left", padx=int(6 * self.current_scaling))
+                entry_widgets.append((name_var, percent_var))
+
+        def on_count_change(*args):
+            try:
+                v = int(count_var.get())
+            except Exception:
+                v = 2
+                count_var.set(2)
+            v = max(2, min(10, v))
+            count_var.set(v)
+            build_rows()
+
+        count_var.trace_add('write', lambda *args: on_count_change())
+        build_rows()
+
+        # Buttons
+        btn_frame = tk.Frame(dialog, bg="#34495e")
+        btn_frame.pack(pady=int(8 * self.current_scaling))
+
+        def save_and_close():
+            splits_list = []
+            try:
+                for name_var, percent_var in entry_widgets:
+                    name = name_var.get().strip()
+                    percent = int(percent_var.get())
+                    splits_list.append([name, percent])
+            except Exception:
+                messagebox.showerror("Error", "Invalid split values")
+                return
+
+            if not (2 <= len(splits_list) <= 10):
+                messagebox.showerror("Error", "Splits count must be between 2 and 10")
+                return
+            if splits_list[-1][1] != 99:
+                messagebox.showerror("Error", "Last split percent must be 99")
+                return
+
+            percents = [p for (_, p) in splits_list]
+            if any(p < 1 or p > 99 for p in percents):
+                messagebox.showerror("Error", "Split percents must be between 1 and 99")
+                return
+            if any(percents[i] <= percents[i-1] for i in range(1, len(percents))):
+                messagebox.showerror("Error", "Split percents must be strictly increasing")
+                return
+
+            normalized = None
+            if self.race_data_manager and hasattr(self.race_data_manager, '_normalize_splits'):
+                normalized = self.race_data_manager._normalize_splits(splits_list)
+                if normalized is None:
+                    messagebox.showerror("Error", "Failed to normalize splits")
+                    return
+                self.race_data_manager.splits = normalized
+
+            if hasattr(self, 'on_configure_splits') and self.on_configure_splits:
+                self.on_configure_splits(normalized if normalized is not None else splits_list)
+
+            dialog.destroy()
+
+        tk.Button(btn_frame, text="Save", command=save_and_close, bg="#27ae60", fg="white", width=10).pack(side="left", padx=int(6 * self.current_scaling))
+        tk.Button(btn_frame, text="Cancel", command=dialog.destroy, bg="#e74c3c", fg="white", width=10).pack(side="left", padx=int(6 * self.current_scaling))
+
+        dialog.focus_set()
     
     def save_ghost_file(self):
         """Open file dialog to save current race data as ghost file."""
@@ -704,7 +835,7 @@ class TimingToolUI:
         
         self.mode_var = tk.StringVar(value="record")
         self.mode_combobox = ttk.Combobox(mode_frame, textvariable=self.mode_var, 
-                                         values=["record", "race"], state="readonly", width=18)
+                         values=["record", "race", "splits"], state="readonly", width=18)
         self.mode_combobox.pack(anchor="w", pady=(int(2 * self.current_scaling), int(0 * self.current_scaling)))
         self.mode_combobox.bind('<<ComboboxSelected>>', self.on_mode_changed)
         
@@ -740,13 +871,20 @@ class TimingToolUI:
                                               relief="flat", width=18, state="disabled")
             self.save_ghost_button.pack(pady=(int(0 * self.current_scaling), int(10 * self.current_scaling)))
         
+        # Configure splits button (enabled only in 'splits' mode)
+        self.configure_splits_button = tk.Button(right_column, text="Configure Splits",
+                             command=self.open_configure_splits_dialog,
+                             bg="#7f8c8d", fg="white", font=("Helvetica", 9),
+                             relief="flat", width=18, state="disabled")
+        self.configure_splits_button.pack(pady=(int(0 * self.current_scaling), int(10 * self.current_scaling)))
+        
         
         # Debug button in bottom right instead of status text
-        self.debug_button = tk.Button(right_column, text="Open Debug Panel", font=("Helvetica", 8, "bold"),
-                         bg="#3498db", fg="white", height=1,
+        self.debug_button = tk.Button(left_column, text="Open Debug Panel", font=("Helvetica", 8, "bold"),
+                         bg="#3498db", fg="white", width=18, height=1,
                          command=self.toggle_debug,
                          relief="flat", bd=1)
-        self.debug_button.pack(padx=int(5 * self.current_scaling), pady=(int(2 * self.current_scaling), int(0 * self.current_scaling)))
+        self.debug_button.pack(side="left", padx=int(5 * self.current_scaling), pady=(int(2 * self.current_scaling), int(0 * self.current_scaling)))
         
         # Debug panel (initially hidden, will be packed below when expanded)
         self.debug_frame = tk.Frame(self.race_panel, bg="#2c3e50",height=120*self.current_scaling)
@@ -843,13 +981,16 @@ class TimingToolUI:
         ui_thread.start()
         return ui_thread
     
-    def set_callbacks(self, on_mode_change=None, on_load_ghost=None, on_save_ghost=None, on_save_race=None, on_close=None):
+    def set_callbacks(self, on_mode_change=None, on_load_ghost=None, on_save_ghost=None, on_save_race=None, on_close=None, on_load_split=None, on_configure_splits=None):
         """Set callback functions for race functionality."""
         self.on_mode_change = on_mode_change
         self.on_load_ghost = on_load_ghost
         self.on_save_ghost = on_save_ghost
         self.on_save_race = on_save_race
         self.on_close = on_close
+        # Optional split-related callbacks
+        self.on_load_split = on_load_split
+        self.on_configure_splits = on_configure_splits
     
     def update_timer(self, timer_display: str):
         """Update timer display."""
@@ -890,7 +1031,7 @@ class TimingToolUI:
         """Close the UI."""
         self.close_app()
 
-#from race_data import RaceDataManager
-#race_data_manager = RaceDataManager()
-#ui = TimingToolUI(race_data_manager)
-#ui.create_ui()
+from race_data import RaceDataManager
+race_data_manager = RaceDataManager()
+ui = TimingToolUI(race_data_manager)
+ui.create_ui()
