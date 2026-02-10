@@ -12,6 +12,7 @@ import sys
 import os
 from src.utils.ui_config import UIConfigManager
 #from ui_config import UIConfigManager
+
 class TimingToolUI:
     """
     Main UI class for the ALU Timing Tool.
