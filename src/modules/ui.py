@@ -10,8 +10,8 @@ import shutil
 import threading
 import sys
 import os
-#from src.utils.ui_config import UIConfigManager
-from ui_config import UIConfigManager
+from src.utils.ui_config import UIConfigManager
+#from ui_config import UIConfigManager
 class TimingToolUI:
     """
     Main UI class for the ALU Timing Tool.
@@ -1221,7 +1221,7 @@ class TimingToolUI:
         """Close the UI."""
         self.close_app()
 
-from race_data import RaceDataManager
-race_data_manager = RaceDataManager()
-ui = TimingToolUI(race_data_manager)
-ui.create_ui()
+#from race_data import RaceDataManager
+#race_data_manager = RaceDataManager()
+#ui = TimingToolUI(race_data_manager)
+#ui.create_ui()
