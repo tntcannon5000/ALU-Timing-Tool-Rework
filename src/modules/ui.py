@@ -10,8 +10,8 @@ import shutil
 import threading
 import sys
 import os
-#from src.utils.ui_config import UIConfigManager
-from ui_config import UIConfigManager
+from src.utils.ui_config import UIConfigManager
+#from ui_config import UIConfigManager
 class TimingToolUI:
     """
     Main UI class for the ALU Timing Tool.
@@ -127,7 +127,7 @@ class TimingToolUI:
         try:
             splits = self.race_data_manager.splits
             if splits:
-                return max(60, int(len(splits) * 30 * self.current_scaling))
+                return max(60, int(len(splits) * 28 * self.current_scaling))
         except Exception:
             pass
         return 0
@@ -136,7 +136,7 @@ class TimingToolUI:
         """Get race panel height (includes debug if expanded)."""
         if not self.race_panel_expanded:
             return 0
-        base = int(170 * self.current_scaling)
+        base = int(137 * self.current_scaling)
         if self.debug_expanded:
             debug_height = int(100 * self.current_scaling)
             return base + debug_height
@@ -160,6 +160,7 @@ class TimingToolUI:
         y = parts[3]
         new_height = self._calculate_total_height()
         self.root.geometry(f"{width}x{new_height}+{x}+{y}")
+        self.main_display_frame.config(height=int(120 * self.current_scaling))
         self.root.update()
 
     def toggle_pin(self):
@@ -473,31 +474,39 @@ class TimingToolUI:
             if not has_live:
                 row = tk.Frame(self.split_view_frame, bg="#222f3e")
                 row.pack(fill='x', padx=int(8 * self.current_scaling), pady=(int(2 * self.current_scaling), int(2 * self.current_scaling)))
-                name_lbl = tk.Label(row, text=name, bg="#222f3e", fg="white", anchor='w', width=20, font=("Helvetica", font_size))
-                name_lbl.pack(side='left')
+                name_lbl = tk.Label(row, text=name, bg="#222f3e", fg="white", anchor='w',width=10, font=("Helvetica", font_size))
+                name_lbl.grid(row=0, column=0, sticky='w')
                 # Placeholder delta
-                delta_lbl = tk.Label(row, text="--.--", bg="#222f3e", fg="#bdc3c7", width=8, font=("Helvetica", font_size))
-                delta_lbl.pack(side='left')
+                delta_lbl = tk.Label(row, text="=0.00", bg="#222f3e", fg="#bdc3c7",width=5, anchor='e', font=("Helvetica", font_size))
+                delta_lbl.grid(row=0, column=1, sticky='e')
+                # Placeholder delta
+                delta_lbl2 = tk.Label(row, text="=0.00", bg="#222f3e", fg="#bdc3c7",width=5, anchor='e', font=("Helvetica", font_size))
+                delta_lbl2.grid(row=0, column=2, sticky='e')
                 # Show percent on right
-                pct_lbl = tk.Label(row, text=f"{percent}%", bg="#222f3e", fg="#bdc3c7", anchor='e', width=8, font=("Helvetica", font_size))
-                pct_lbl.pack(side='right')
+                pct_lbl = tk.Label(row, text=f"0.00", bg="#222f3e", fg="#bdc3c7",width=4, anchor='e', font=("Helvetica", font_size))
+                pct_lbl.grid(row=0, column=3, sticky='e')
             else:
                 current_time = self.race_data_manager.current_race_data.get(str(percent), "0000000") if hasattr(self.race_data_manager, 'current_race_data') else "0000000"
                 # Compute delta if possible
-                delta_display = ""
+                delta_display_pb = ""
+                delta_display_bpt = ""
                 try:
                     if current_time and ghost_time and current_time != "0000000" and ghost_time != "0000000":
                         delta_ms = int(current_time) - int(ghost_time)
-                        delta_display = self._format_delta_ms(delta_ms)
+                        delta_display_pb = self._format_delta_ms(delta_ms)
+                        delta_display_bpt = self._format_delta_ms(delta_ms)
                 except Exception:
-                    delta_display = ""
+                    delta_display_pb = ""
+                    delta_display_bpt = ""
 
                 row = tk.Frame(self.split_view_frame, bg="#222f3e")
                 row.pack(fill='x', padx=int(8 * self.current_scaling), pady=(int(2 * self.current_scaling), int(2 * self.current_scaling)))
                 name_lbl = tk.Label(row, text=name, bg="#222f3e", fg="white", anchor='w', width=20, font=("Helvetica", font_size))
                 name_lbl.pack(side='left')
-                delta_lbl = tk.Label(row, text=delta_display, bg="#222f3e", fg="#2ecc71" if delta_display and delta_display.startswith('-') else "#e74c3c", width=8, font=("Helvetica", font_size))
-                delta_lbl.pack(side='left')
+                delta_lbl_pb = tk.Label(row, text=delta_display_pb, bg="#222f3e", fg="#2ecc71" if delta_display_pb and delta_display_pb.startswith('-') else "#e74c3c", width=8, font=("Helvetica", font_size))
+                delta_lbl_pb.pack(side='left')
+                delta_lbl_bpt = tk.Label(row, text=delta_display_bpt, bg="#222f3e", fg="#2ecc71" if delta_display_bpt and delta_display_bpt.startswith('-') else "#e74c3c", width=8, font=("Helvetica", font_size))
+                delta_lbl_bpt.pack(side='left')
                 time_lbl = tk.Label(row, text=self._format_time_ms(ghost_time), bg="#222f3e", fg="#bdc3c7", anchor='e', width=12, font=("Helvetica", font_size))
                 time_lbl.pack(side='right')
     
@@ -786,6 +795,8 @@ class TimingToolUI:
         # Create race panel content
         self._create_race_panel_content()
         
+        self.main_display_frame.config(height=int(120 * self.current_scaling))
+        self.root.update()
         # Rebind keyboard shortcuts
         self.root.bind_all("<Control-plus>", lambda e: self.increase_scaling())
         self.root.bind_all("<Control-equal>", lambda e: self.increase_scaling())
@@ -976,7 +987,8 @@ class TimingToolUI:
         # Make the window appear on top initially
         self.root.lift()
         self.root.focus_force()
-        
+        self.main_display_frame.config(height=int(120 * self.current_scaling))
+        self.root.update()
         self.root.mainloop()
     
     def _create_race_panel_content(self):
@@ -1025,28 +1037,36 @@ class TimingToolUI:
                      command=self.toggle_split_view,
                      bg="#7f8c8d", fg="white", font=("Helvetica", 9),
                      relief="flat", width=18, state="disabled")
-        self.toggle_split_view_button.pack(pady=(int(0 * self.current_scaling), int(4 * self.current_scaling)))
+        self.toggle_split_view_button.pack(anchor='w',pady=(int(0 * self.current_scaling), int(4 * self.current_scaling)))
+
+
+        # Button container at bottom of left column - only for debug button
+        #button_container = tk.Frame(left_column, bg="#2c3e50")
+        #button_container.pack(fill="x", pady=(int(4 * self.current_scaling), int(0 * self.current_scaling)))
+        
+        # Debug button
+        self.debug_button = tk.Button(left_column, text="Open Debug Panel", font=("Helvetica", 9),
+                         bg="#3498db", fg="white", width=18,
+                         command=self.toggle_debug,
+                         relief="flat")
+        self.debug_button.pack(anchor='w', pady=int(0 * self.current_scaling))
+
+
+
 
         # Right column - Action buttons and status
         right_column = tk.Frame(main_container, bg="#2c3e50")
         right_column.pack(side="right", fill="both", expand=True)
         
-        # Configure splits button (enabled only in 'splits' mode)
-        self.configure_splits_button = tk.Button(right_column, text="Configure Splits",
-                             command=self.open_configure_splits_dialog,
-                             bg="#7f8c8d", fg="white", font=("Helvetica", 9),
-                             relief="flat", width=18, state="disabled")
-        self.configure_splits_button.pack(pady=(int(4 * self.current_scaling), int(4 * self.current_scaling)))
-
         # Close button (rightmost)
         self.close_button = tk.Button(right_column, text="Close Timing Tool", command=self.close_app, 
-                      bg="#e74c3c", fg="white", font=("Helvetica", 8, "bold"),
+                      bg="#e74c3c", fg="white", font=("Helvetica", 9),
                       relief="flat", height=1)
         self.close_button.pack(pady=(int(0 * self.current_scaling), int(10 * self.current_scaling)))
         
         # Pin button (second from right)
         self.pin_button = tk.Button(right_column, text="Toggle Window Pin", command=self.toggle_pin, 
-                      bg="#4ecdc4", fg="white", font=("Helvetica", 8, "bold"),
+                      bg="#4ecdc4", fg="white", font=("Helvetica", 9),
                       relief="flat", height=1)
         self.pin_button.pack(pady=(int(0 * self.current_scaling), int(10 * self.current_scaling)))
 
@@ -1056,6 +1076,7 @@ class TimingToolUI:
                           bg="#7f8c8d", fg="white", font=("Helvetica", 9),
                           relief="flat", width=18, state="disabled")
         self.load_ghost_button.pack(pady=(int(0 * self.current_scaling), int(10 * self.current_scaling)))
+
         
         # Save ghost button (add this if it doesn't exist)
         if hasattr(self, 'save_ghost_file'):
@@ -1065,16 +1086,13 @@ class TimingToolUI:
                                               relief="flat", width=18, state="disabled")
             self.save_ghost_button.pack(pady=(int(0 * self.current_scaling), int(10 * self.current_scaling)))
         
-        # Button container at bottom of left column - only for debug button
-        button_container = tk.Frame(left_column, bg="#2c3e50")
-        button_container.pack(fill="x", pady=(int(4 * self.current_scaling), int(0 * self.current_scaling)))
-        
-        # Debug button
-        self.debug_button = tk.Button(button_container, text="Open Debug Panel", font=("Helvetica", 8, "bold"),
-                         bg="#3498db", fg="white", width=18, height=1,
-                         command=self.toggle_debug,
-                         relief="flat", bd=1)
-        self.debug_button.pack(fill="x", padx=int(0 * self.current_scaling), pady=int(0 * self.current_scaling))
+        # Configure splits button (enabled only in 'splits' mode)
+        self.configure_splits_button = tk.Button(right_column, text="Configure Splits",
+                             command=self.open_configure_splits_dialog,
+                             bg="#7f8c8d", fg="white", font=("Helvetica", 9),
+                             relief="flat", width=18, state="disabled")
+        self.configure_splits_button.pack(pady=(int(0 * self.current_scaling), int(4 * self.current_scaling)))
+
         
         # Debug panel (initially hidden, will be packed below when expanded)
         self.debug_frame = tk.Frame(self.race_panel, bg="#2c3e50",height=120*self.current_scaling)
@@ -1221,7 +1239,7 @@ class TimingToolUI:
         """Close the UI."""
         self.close_app()
 
-from race_data import RaceDataManager
-race_data_manager = RaceDataManager()
-ui = TimingToolUI(race_data_manager)
-ui.create_ui()
+#from race_data import RaceDataManager
+#race_data_manager = RaceDataManager()
+#ui = TimingToolUI(race_data_manager)
+#ui.create_ui()
