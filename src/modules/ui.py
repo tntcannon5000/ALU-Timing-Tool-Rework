@@ -12,7 +12,10 @@ import sys
 import os
 from src.utils.ui_config import UIConfigManager
 #from ui_config import UIConfigManager
+<<<<<<< HEAD
 
+=======
+>>>>>>> ba829b2c05e8a1d22c15593b70b8939a73b5cfbc
 class TimingToolUI:
     """
     Main UI class for the ALU Timing Tool.
@@ -1243,4 +1246,8 @@ class TimingToolUI:
 #from race_data import RaceDataManager
 #race_data_manager = RaceDataManager()
 #ui = TimingToolUI(race_data_manager)
+<<<<<<< HEAD
 #ui.create_ui()
+=======
+#ui.create_ui()
+>>>>>>> ba829b2c05e8a1d22c15593b70b8939a73b5cfbc
