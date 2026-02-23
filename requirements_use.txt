@@ -1,0 +1,8 @@
+# ALU Timing Tool v5 - User Dependencies
+# Minimal requirements for running the timing tool
+
+# Window detection (win32gui, win32api)
+pywin32>=311
+
+# Environment configuration
+python-dotenv>=1.0

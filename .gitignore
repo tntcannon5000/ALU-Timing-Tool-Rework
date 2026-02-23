@@ -2,3 +2,9 @@ __pycache__/
 venv/
 venvbak/
 dataset/
+
+# User config
+ui_config.json
+
+# Race data output
+runs/

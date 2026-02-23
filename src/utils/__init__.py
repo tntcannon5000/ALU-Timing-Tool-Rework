@@ -1,41 +1,12 @@
-"""
-Utilities for ALU Timing Tool
+"""Utilities for ALU Timing Tool (v5)
 
 This package contains utility modules for the timing tool.
+Legacy v4 modules (device detection, cv2 helpers) have been removed.
 """
 
-from .helpers import *
-from .windowtools import *
 from .ui_config import UIConfigManager
-from .device import (
-    get_device,
-    get_device_type,
-    get_device_manager,
-    is_cuda,
-    is_xpu,
-    is_cpu,
-    is_accelerated,
-    synchronize_device,
-    empty_device_cache,
-    optimize_backends,
-    get_easyocr_reader,
-    get_device_info,
-    DeviceType
-)
+from .windowtools import *
 
 __all__ = [
     'UIConfigManager',
-    'get_device',
-    'get_device_type',
-    'get_device_manager',
-    'is_cuda',
-    'is_xpu',
-    'is_cpu',
-    'is_accelerated',
-    'synchronize_device',
-    'empty_device_cache',
-    'optimize_backends',
-    'get_easyocr_reader',
-    'get_device_info',
-    'DeviceType'
 ]

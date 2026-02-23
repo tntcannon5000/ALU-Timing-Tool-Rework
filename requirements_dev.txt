@@ -1,0 +1,26 @@
+# ALU Timing Tool v5 - Developer Dependencies
+# Full requirements including Jupyter for development
+
+# === CORE (same as requirements_use.txt) ===
+# Window detection (win32gui, win32api)
+pywin32>=311
+
+# Environment configuration
+python-dotenv>=1.0
+
+# === JUPYTER/IPYTHON (development only) ===
+ipykernel>=7.0
+ipython>=9.0
+ipywidgets>=8.0
+jupyter_client>=8.0
+jupyter_core>=5.0
+jupyterlab_widgets>=3.0
+widgetsnbextension>=4.0
+
+# Jupyter transitive dependencies
+comm>=0.2
+debugpy>=1.8
+nest-asyncio>=1.6
+traitlets>=5.14
+tornado>=6.0
+pyzmq>=27.0

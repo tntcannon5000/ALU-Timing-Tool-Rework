@@ -244,7 +244,7 @@ class RaceDataManager:
     
     def save_race_data(self, filename: str) -> bool:
         """
-        Save current race data to a JSON file.
+        Save current race data to a JSON file in the runs/ folder.
         
         Args:
             filename: Name of the file to save (without extension)
@@ -266,8 +266,15 @@ class RaceDataManager:
             if not filename.endswith('.json'):
                 filename += '.json'
             
+            # Ensure runs/ directory exists
+            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "runs")
+            os.makedirs(runs_dir, exist_ok=True)
+            
+            # Build full path in runs/ folder
+            filepath = os.path.join(runs_dir, os.path.basename(filename))
+            
             # Save to file
-            with open(filename, 'w') as f:
+            with open(filepath, 'w') as f:
                 json.dump(race_data, f, indent=2)
             
             return True

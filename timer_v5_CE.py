@@ -67,6 +67,9 @@ class ALUTimingTool:
         self._finish_locked: bool = False
         self._prev_checkpoint: int = 0
         self._final_timer_ms: int = 0   # last timer while racing ("true final")
+        # Guard against stale progress: CE memory keeps 100% from race N-1.
+        # Only allow finish detection once we've seen progress < 50% this race.
+        self._progress_legitimized: bool = False
 
         # Change-detection trackers
         self._prev_timer_ms: int = 0
@@ -320,6 +323,7 @@ class ALUTimingTool:
         self.last_captured_timer_ms = 0
         self.estimated_finish_ms = None
         self._finish_locked = False
+        self._progress_legitimized = False  # Must see < 50% before finish detection
         # NOTE: Do NOT reset _prev_checkpoint here — track it continuously
         # like the notebook does (only reset finish_locked, not checkpoint)
         self._final_timer_ms = 0
@@ -489,14 +493,29 @@ class ALUTimingTool:
             actively_racing = game_state == "racing" and self.race_in_progress
 
             # -- Finish trigger (checkpoint-based, matching notebook EXACTLY) --
-            # Reset finish_locked every tick when in menus/starting (like notebook)
+            # Reset finish state every tick when in menus/starting.
+            # CRITICAL: Also sync prev_checkpoint to current checkpoint!
+            # Otherwise stale prev_checkpoint from race N causes false
+            # cp_wrapped detection early in race N+1.
             if game_state in ("menus", "starting"):
                 self.estimated_finish_ms = None
                 self._finish_locked = False
+                self._progress_legitimized = False  # Reset for new race
+                self._prev_checkpoint = checkpoint
 
             # Uses float pct and timer in MICROSECONDS (like notebook)
             float_pct = round(progress_raw * 100, 2) if 0.0 <= progress_raw <= 1.0 else round(progress_raw, 2)
-            if not self._finish_locked:
+
+            # Track that progress legitimately dropped (proves it's not stale from race N-1).
+            # CE memory retains 100% from previous race for several seconds after new race starts.
+            if float_pct < 50.0 and self.race_in_progress:
+                if not self._progress_legitimized:
+                    print(f"Progress legitimized at {float_pct}%")
+                self._progress_legitimized = True
+
+            # Only trigger finish detection if progress has been legitimized.
+            # This prevents false triggers when progress is stale at 100% from the previous race.
+            if not self._finish_locked and self._progress_legitimized:
                 finish_us = self._check_finish_trigger(
                     checkpoint, self._prev_checkpoint, float_pct, timer_raw_us
                 )
