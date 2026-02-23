@@ -6,7 +6,7 @@ Receives full game telemetry from Cheat Engine via a shared temp file
 been removed — CE handles memory reading directly.
 
 Data fields from CE bridge (pipe-delimited):
-  timer | progress | rpm | gear | rpmRaw | checkpoint
+  timer | progress | rpm | gear | rpmRaw | checkpoint | visualTimer
 
 Prerequisites:
   1. ALU_Trainer_v2.CT open in Cheat Engine (auto-attaches)
@@ -40,7 +40,7 @@ class ALUTimingTool:
         # Core components
         self.race_data_manager = RaceDataManager()
         self.ui = TimingToolUI(self.race_data_manager)
-        self.ce_client = CheatEngineClient()
+        self.ce_client = CheatEngineClient(poll_interval=0.001)  # 1ms = 1000Hz
 
         # Lifecycle
         self.capturing: bool = True
@@ -61,10 +61,16 @@ class ALUTimingTool:
         self.estimated_finish_ms: Optional[int] = None
         self.last_valid_delta: str = "--.---"
 
+        # Finish detection — checkpoint method (from notebook)
+        # At 99%+, checkpoint increments at the finish instant.
+        # Fires twice ~1s apart; we only use the first.
+        self._finish_locked: bool = False
+        self._prev_checkpoint: int = 0
+        self._final_timer_ms: int = 0   # last timer while racing ("true final")
+
         # Change-detection trackers
         self._prev_timer_ms: int = 0
         self._prev_progress_pct: int = 0
-        self._prev_checkpoint: int = 0
 
         # Performance tracking
         self.loop_times: deque = deque(maxlen=30)
@@ -187,6 +193,56 @@ class ALUTimingTool:
         return f"{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
 
     # ------------------------------------------------------------------
+    # Race state detection
+    # ------------------------------------------------------------------
+    # "visual_timer" is a misnomer from the CT — it's really a race-state
+    # indicator that the game always increments.  Key behaviours:
+    #   1,000,000  → player is in menus
+    #   0          → race countdown / pre-race (gear == 0 confirms)
+    #   diverges from timer_raw after finish (timer_raw freezes ~1s
+    #     after the race ends, while this value keeps climbing)
+    #
+    # timer_raw is the ACTUAL race timer in µs.  It stops automatically
+    # ~900-1100ms after race completion — we never need to stop it manually.
+    # ------------------------------------------------------------------
+
+    RACE_ENDED_THRESHOLD_US = 3250  # µs divergence before we confirm race ended
+
+    @staticmethod
+    def _detect_race_state(
+        race_state_val: int,
+        timer_raw_us: int,
+        progress_raw: float,
+        gear: int,
+    ) -> str:
+        """
+        Detect current game state from telemetry values.
+
+        Args:
+            race_state_val: CE "VisualTimer" — actually a race-state indicator
+            timer_raw_us:   Actual race timer in microseconds (freezes after finish)
+            progress_raw:   Race progress 0.0–1.0
+            gear:           Current gear (0 = neutral / pre-race)
+
+        Returns one of: 'menus', 'starting', 'racing', 'ended'
+        """
+        if race_state_val == 1_000_000:
+            return "menus"
+        elif race_state_val == 0:
+            if gear == 0:
+                return "starting"
+            else:
+                return "menus"
+        elif (
+            timer_raw_us > 0
+            and progress_raw > 0.97
+            and (race_state_val - timer_raw_us) > ALUTimingTool.RACE_ENDED_THRESHOLD_US
+        ):
+            return "ended"
+        else:
+            return "racing"
+
+    # ------------------------------------------------------------------
     # Finish detection (checkpoint-based, from notebook)
     # ------------------------------------------------------------------
 
@@ -194,20 +250,21 @@ class ALUTimingTool:
     def _check_finish_trigger(
         checkpoint: int,
         prev_checkpoint: int,
-        progress_pct: int,
-        timer_ms: int,
+        progress_pct: float,
+        timer_us: int,
     ) -> Optional[int]:
         """
         Detect the instant the race finishes using checkpoint data.
+        (Matching notebook logic exactly)
 
-        Trigger: progress >= 99 AND (checkpoint increased OR wrapped to 0).
-        Returns the timer_ms at that instant, or None.
+        Trigger: progress > 99.0 AND (checkpoint increased OR wrapped to 0).
+        Returns timer_us (microseconds) at that instant, or None.
         """
-        if progress_pct >= 99:
+        if progress_pct > 99.0:
             cp_increased = checkpoint > prev_checkpoint
             cp_wrapped = checkpoint == 0 and prev_checkpoint != 0
             if cp_increased or cp_wrapped:
-                return timer_ms
+                return timer_us
         return None
 
     # ------------------------------------------------------------------
@@ -220,10 +277,22 @@ class ALUTimingTool:
             return
         self.race_completed = True
 
-        # Best finish time: checkpoint-trigger estimate > last captured
-        final_time = self.estimated_finish_ms or self.last_captured_timer_ms
-        if final_time > 0:
-            self.race_data_manager.record_final_time(final_time)
+        estimate = self.estimated_finish_ms or 0
+        true_final = self._final_timer_ms or self.last_captured_timer_ms
+
+        # --- Console comparison log ---
+        print("═" * 55)
+        print(f"  FINISH ESTIMATE (checkpoint)     : {self._format_timer(estimate)}  ({estimate}ms)")
+        print(f"  TRUE FINAL (last raw timer)      : {self._format_timer(true_final)}  ({true_final}ms)")
+        diff = abs(true_final - estimate)
+        print(f"  DIFFERENCE                       : {diff}ms")
+        print("═" * 55)
+
+        # Use the checkpoint estimate as the recorded 100% time;
+        # fall back to true final if checkpoint never fired.
+        final_time = estimate if estimate > 0 else true_final
+        self.estimated_finish_ms = final_time
+        self.race_data_manager.record_final_time(final_time)
 
         mode_label = self.ui.get_current_mode()
         print(
@@ -237,24 +306,12 @@ class ALUTimingTool:
 
         threading.Thread(target=prompt_save, daemon=True).start()
 
-    def _handle_race_end(self):
-        """Transition from racing to menus. Trigger completion if appropriate."""
-        if self.race_in_progress:
-            # If we were deep enough into the race, treat it as completed
-            if self.reached_high_progress and not self.race_completed:
-                print("Race completed — reached 98%+ then returned to menus")
-                self._handle_race_completion()
-            self.race_in_progress = False
-            print("Race ended — returned to menus")
-
-    def _handle_potential_race_start(self):
-        """Prepare for a new race; reset if previous race was completed."""
-        if self.race_completed:
-            print("New race detected — resetting state")
-            self.reset_race_state()
-
     def reset_race_state(self):
-        """Reset all per-race tracking for a fresh race."""
+        """Reset all per-race tracking for a fresh race.
+
+        Also zeros display values since CE memory retains stale
+        timer/progress from the previous race until the car moves.
+        """
         self.race_completed = False
         self.race_in_progress = False
         self.reached_high_progress = False
@@ -262,10 +319,17 @@ class ALUTimingTool:
         self.last_percentage = 0
         self.last_captured_timer_ms = 0
         self.estimated_finish_ms = None
+        self._finish_locked = False
+        # NOTE: Do NOT reset _prev_checkpoint here — track it continuously
+        # like the notebook does (only reset finish_locked, not checkpoint)
+        self._final_timer_ms = 0
         self.last_valid_delta = "--.---"
         self._prev_timer_ms = 0
         self._prev_progress_pct = 0
-        self._prev_checkpoint = 0
+        # Zero display — CE memory still has stale values
+        self.current_timer_ms = 0
+        self.current_timer_display = "00:00.000"
+        self.percentage = "0%"
         self.race_data_manager.reset_race_data()
         self.ui.update_save_ghost_button_state()
         print("Race state reset")
@@ -283,10 +347,16 @@ class ALUTimingTool:
         if current_pct > self.max_percentage_reached:
             self.max_percentage_reached = current_pct
 
-        # Record time at this percentage
-        if self.race_in_progress and timer_ms > 0:
-            self.race_data_manager.record_time_at_percentage(current_pct, timer_ms)
-            print(f"Recorded {current_pct}%: {timer_ms}ms")
+        # Record time at this percentage (first crossing only)
+        # Skip 100% — that's handled by checkpoint finish detection
+        if self.race_in_progress and timer_ms > 0 and current_pct < 100:
+            # Check if this percentage already has a recorded value
+            existing = self.race_data_manager.current_race_data.get(str(current_pct), "0000000")
+            if existing == "0000000" or current_pct == 0:
+                self.race_data_manager.record_time_at_percentage(current_pct, timer_ms)
+                print(f"Recorded {current_pct}%: {timer_ms}ms")
+            else:
+                print(f"Skipping {current_pct}% — already recorded as {existing}ms")
             self.ui.update_save_ghost_button_state()
 
         # Delta calculation
@@ -319,14 +389,22 @@ class ALUTimingTool:
         """
         Main processing loop.
 
-        Each tick:
-          1. Read all telemetry from CE client
-          2. Detect race state transitions
-          3. Check for finish trigger (checkpoint-based)
-          4. Process percentage / timer changes
-          5. Update UI (throttled)
+        Game state machine (from notebook ground truth):
+          menus    → player in menus; nothing to do
+          starting → race countdown; stale values still in memory — RESET here
+          racing   → race active; record data, check finish
+          ended    → race just finished; timer_raw frozen, race_state keeps going
+
+        Transitions:
+          menus/starting → racing  : race begins, start recording
+          racing → ended           : finish detected via game state
+          ended/racing → menus     : back to menus
+          anything → starting      : new race countdown, reset stale data
         """
         print("Starting main loop (CE backend)...")
+        prev_game_state = "menus"
+        _debug_log_interval = 3.0
+        _last_debug_log = 0.0
 
         while self.capturing:
             loop_start = systime.perf_counter()
@@ -337,7 +415,8 @@ class ALUTimingTool:
             timer_raw_us = vals["timer_raw"]        # microseconds
             progress_raw = vals["progress"]          # 0.0–1.0
             checkpoint = vals["checkpoint"]
-            # gear and rpm available in vals but not needed for core logic
+            race_state_val = vals["visual_timer"]  # misnomer in CT; it's a race-state indicator
+            gear = vals["gear"]
 
             timer_ms = timer_raw_us // 1000
             if 0.0 <= progress_raw <= 1.0:
@@ -345,47 +424,112 @@ class ALUTimingTool:
             else:
                 current_pct = int(round(progress_raw))
 
-            # -- Race state detection ----------------------------------
-            in_race_now = timer_ms > 0 or current_pct > 0
-
-            if not in_race_now and self.race_in_progress:
-                self._handle_race_end()
-            elif in_race_now and not self.race_in_progress:
-                self._handle_potential_race_start()
-                self.race_in_progress = True
-                print(f"Race detected at {current_pct}%")
-
-            # -- Finish trigger (checkpoint-based) ---------------------
-            if self.race_in_progress and not self.race_completed:
-                finish_ms = self._check_finish_trigger(
-                    checkpoint, self._prev_checkpoint, current_pct, timer_ms
+            # -- Periodic debug log ------------------------------------
+            _now_mono = systime.perf_counter()
+            if _now_mono - _last_debug_log >= _debug_log_interval:
+                connected = self.ce_client.is_connected()
+                print(
+                    f"[DEBUG] CE: conn={connected} | "
+                    f"timer={timer_ms}ms pct={current_pct}% gear={gear} "
+                    f"vt={race_state_val} cp={checkpoint} | "
+                    f"state={prev_game_state} racing={self.race_in_progress} "
+                    f"completed={self.race_completed}"
                 )
-                if finish_ms is not None:
-                    self.estimated_finish_ms = finish_ms
-                    print(f"Finish detected via checkpoint! Timer: {finish_ms}ms")
+                _last_debug_log = _now_mono
+
+            # -- Game state detection ----------------------------------
+            game_state = self._detect_race_state(
+                race_state_val, timer_raw_us, progress_raw, gear
+            )
+
+            # -- State transitions -------------------------------------
+
+            # "starting" = countdown — reset for a fresh race.
+            if game_state == "starting" and prev_game_state != "starting":
+                print("Race countdown — resetting for new race")
+                self.reset_race_state()
+
+            # Transition INTO racing — start recording.
+            if game_state == "racing" and not self.race_in_progress:
+                if self.race_completed or self.max_percentage_reached > 0:
+                    self.reset_race_state()
+                self.race_in_progress = True
+                print("Race active — recording")
+
+            # Transition to "ended" — game says race finished.
+            # Must also require race_in_progress to avoid ghost completions
+            # from stale CE memory (bridge file retains data across sessions).
+            if game_state == "ended" and prev_game_state == "racing":
+                if not self.race_completed and self.race_in_progress:
+                    print("Game state: Race Ended")
                     self._handle_race_completion()
 
+            # Transition to "menus" — player left
+            if game_state == "menus" and prev_game_state != "menus":
+                if self.race_in_progress and not self.race_completed:
+                    # Quit mid-race — discard
+                    print("Returned to menus mid-race — discarding partial data")
+                    self.reset_race_state()
+                elif self.race_in_progress:
+                    self.race_in_progress = False
+                    print("Returned to menus after race completion")
+                # CE memory retains stale timer/progress after race ends.
+                # Zero our own interpretation so stale values aren't
+                # shown or re-recorded when the next race starts.
+                self._prev_timer_ms = 0
+                self._prev_progress_pct = 0
+                self.current_timer_ms = 0
+                self.current_timer_display = "00:00.000"
+                self.percentage = "0%"
+                self.last_captured_timer_ms = 0
+
+            prev_game_state = game_state
+
+            # -- Only process data while actually racing ---------------
+            actively_racing = game_state == "racing" and self.race_in_progress
+
+            # -- Finish trigger (checkpoint-based, matching notebook EXACTLY) --
+            # Reset finish_locked every tick when in menus/starting (like notebook)
+            if game_state in ("menus", "starting"):
+                self.estimated_finish_ms = None
+                self._finish_locked = False
+
+            # Uses float pct and timer in MICROSECONDS (like notebook)
+            float_pct = round(progress_raw * 100, 2) if 0.0 <= progress_raw <= 1.0 else round(progress_raw, 2)
+            if not self._finish_locked:
+                finish_us = self._check_finish_trigger(
+                    checkpoint, self._prev_checkpoint, float_pct, timer_raw_us
+                )
+                if finish_us is not None:
+                    # Store in ms for consistency with rest of codebase
+                    self.estimated_finish_ms = finish_us // 1000
+                    self._finish_locked = True
+                    print(f"Finish detected via checkpoint — estimate: {self._format_timer(finish_us // 1000)}")
+            if actively_racing and not self.race_completed:
+                # Always track the very last timer value while racing
+                self._final_timer_ms = timer_ms
             self._prev_checkpoint = checkpoint
 
             # -- Percentage change -------------------------------------
             pct_changed = current_pct != self._prev_progress_pct
-            if pct_changed and in_race_now:
+            if pct_changed and actively_racing and not self.race_completed:
                 prev_pct = self._prev_progress_pct
                 self._prev_progress_pct = current_pct
                 print(f"Percentage: {prev_pct}% → {current_pct}%")
                 self._process_percentage_change(current_pct, prev_pct, timer_ms)
 
-            self.percentage = f"{current_pct}%"
+            if actively_racing:
+                self.percentage = f"{current_pct}%"
 
             # -- Timer change ------------------------------------------
-            if timer_ms != self._prev_timer_ms and in_race_now:
+            if timer_ms != self._prev_timer_ms and actively_racing and not self.race_completed:
                 self._prev_timer_ms = timer_ms
                 self.current_timer_ms = timer_ms
                 self.last_captured_timer_ms = timer_ms
                 self.current_timer_display = self._format_timer(timer_ms)
 
             # -- Non-race UI reset -------------------------------------
-            if not in_race_now:
+            if not actively_racing and not self.race_completed:
                 self.ui.update_delta("--.---")
                 self.ui.update_background_color("record")
 
@@ -402,8 +546,8 @@ class ALUTimingTool:
             self.avg_loop_time = sum(self.loop_times) / len(self.loop_times)
             self.ui.update_loop_time(elapsed_ms, self.avg_loop_time)
 
-            # Sleep to avoid busy-spinning (~500 Hz is plenty)
-            systime.sleep(0.002)
+            # Sleep to avoid busy-spinning (~1000 Hz)
+            systime.sleep(0.001)
 
     # ------------------------------------------------------------------
     # Stats

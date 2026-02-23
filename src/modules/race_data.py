@@ -50,6 +50,10 @@ class RaceDataManager:
             time_ms: Time in milliseconds (7 digits, padded with zeros)
         """
         if 0 <= percentage <= 100:
+            # 0% is always 0ms by definition
+            if percentage == 0:
+                self.current_race_data["0"] = "0000000"
+                return
             # Ensure time is always 7 digits, padded with leading zeros
             formatted_time = f"{time_ms:07d}"
             
@@ -57,12 +61,6 @@ class RaceDataManager:
             if formatted_time == "0000000" and percentage != 0:
                 print(f"Warning: Ignoring invalid time 00.00.000 at {percentage}% (can only be at 0%)")
                 return
-            
-            # Validate and correct anomalous readings
-            corrected_time = self._validate_and_correct_time(percentage, time_ms)
-            if corrected_time != time_ms:
-                print(f"Corrected anomalous time at {percentage}%: {time_ms}ms -> {corrected_time}ms")
-                formatted_time = f"{corrected_time:07d}"
             
             # Special handling for 99% - only set it once (first time we reach 99%)
             if percentage == 99:
@@ -256,6 +254,9 @@ class RaceDataManager:
                 "fingerprint": "ALU_TOOL",
                 "times": self.current_race_data.copy()
             }
+            
+            # 0% is always 0ms by definition
+            race_data["times"]["0"] = "0000000"
             
             # Ensure filename has .json extension
             if not filename.endswith('.json'):

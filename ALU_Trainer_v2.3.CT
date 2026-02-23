@@ -477,14 +477,14 @@ if syntaxcheck then return end
 -- READS values that were already copied into our own allocated
 -- memory labels (RaceTimer, RaceProgress, etc.).
 --
--- The temp file is written atomically (write .tmp then rename)
--- to prevent the Python side from reading a partial line.
+-- The temp file is overwritten directly each cycle.  The Python
+-- reader handles partial reads gracefully, and direct writes avoid
+-- Windows file-locking issues with the remove+rename pattern.
 -- ================================================================
 
 -- Configuration
 local ALU_SEND_INTERVAL = 1        -- Timer interval in ms (~1ms polling)
 local ALU_DATA_PATH = os.getenv("TEMP") .. "\\alu_ce_bridge.dat"
-local ALU_TMP_PATH  = ALU_DATA_PATH .. ".tmp"
 
 -- State variables
 ALU_pollTimer  = nil   -- CE timer object that drives the polling loop
@@ -533,7 +533,6 @@ function ALU_stop()
 
   -- Clean up temp files so we don't leave stale data
   pcall(os.remove, ALU_DATA_PATH)
-  pcall(os.remove, ALU_TMP_PATH)
 
   -- Close the status window
   if ALU_statusForm then
@@ -610,19 +609,20 @@ end
 -- Write telemetry to file (called every ALU_SEND_INTERVAL ms)
 -- ----------------------------------------------------------------
 -- Format: timer|progress|rpm|gear|rpmRaw|checkpoint|visualTimer
--- Written atomically: write to .tmp first, then rename over .dat
--- This prevents the Python reader from ever seeing a partial line.
+-- Written as direct overwrite.  No remove+rename dance — on Windows
+-- that pattern causes file-locking deadlocks when the Python reader
+-- holds a read handle at the instant we try to delete.  A direct
+-- overwrite is safe: worst case Python sees a partial line, which
+-- _parse_line already handles gracefully.
 -- ----------------------------------------------------------------
 
 function ALU_writeToFile()
   local t, p, rpm, gear, rpmRaw, cp, vt = ALU_readGameValues()
 
-  local f = io.open(ALU_TMP_PATH, "w")
+  local f = io.open(ALU_DATA_PATH, "w")
   if f then
     f:write(string.format("%d|%.6f|%d|%d|%.6f|%d|%d", t, p, rpm, gear, rpmRaw, cp, vt))
     f:close()
-    os.remove(ALU_DATA_PATH)
-    os.rename(ALU_TMP_PATH, ALU_DATA_PATH)
 
     ALU_writeCount = ALU_writeCount + 1
 
@@ -665,7 +665,6 @@ end
 
 -- Remove bridge files so stale data isn't left behind
 pcall(os.remove, os.getenv("TEMP") .. "\\alu_ce_bridge.dat")
-pcall(os.remove, os.getenv("TEMP") .. "\\alu_ce_bridge.dat.tmp")
 
 -- Close status window
 if ALU_statusForm then

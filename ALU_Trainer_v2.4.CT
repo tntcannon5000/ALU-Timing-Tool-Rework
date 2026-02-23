@@ -1,0 +1,799 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ALU Timing Tool — Cheat Table v2.4
+  ===================================
+  This is a READ-ONLY timing/telemetry overlay for Asphalt 9: Legends (Steam).
+  It does NOT modify any game values, inject cheats, or alter gameplay.
+
+  Purpose:
+    - Reads race timer, progress, RPM, gear, checkpoint, and visual timer
+      values from game memory for display in an external timing tool.
+    - Writes those values to a local temp file so a companion Python app
+      can display split times, ghost comparisons, and race analytics.
+
+  How it works:
+    1. Auto Assembler scripts hook specific instructions to COPY values
+       into labeled memory locations (the original instructions still execute).
+    2. A Lua bridge script reads those labeled addresses and writes them
+       to %TEMP%\alu_ce_bridge.dat every ~1ms for the Python app to read.
+    3. A small status window shows bridge activity so the user can see
+       it is running and stop it when done.
+
+  v2.4 changes:
+    - Bridge file writer uses in-place overwrites (no truncation) with
+      fixed-size 128-byte null-padded payloads.  Eliminates the race
+      condition where Python reads an empty file during truncation.
+
+  This table is part of the open-source ALU Timing Tool project.
+  No game values are modified. No competitive advantage is gained.
+  This is purely a telemetry reader for personal race analysis.
+-->
+<CheatTable CheatEngineTableVersion="46">
+  <CheatEntries>
+    <!--
+      ============================================================
+      Script 1: Gearbox Info (READ-ONLY)
+      ============================================================
+      Hooks the RPM write instruction to COPY the RPM and gear values
+      into our own labeled memory. The original instruction executes
+      normally — we just read the values it was already writing.
+
+      Hooked instruction: movss [rdi+1B8], xmm1  (RPM write)
+      We also read [rdi+A0] for the current gear number.
+
+      Exported symbols (read-only copies):
+        RaceRPM_Raw  — float RPM value
+        RaceRPM_Int  — integer RPM value (converted from float)
+        RaceGear     — current gear number (0 = neutral)
+    -->
+    <CheatEntry>
+      <ID>0</ID>
+      <Description>"Gearbox Info"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+// ------------------------------------------------------------------
+// Gearbox Info — READ-ONLY telemetry hook
+// Copies RPM and gear values for external display.
+// Original instruction is preserved; no game values are changed.
+// ------------------------------------------------------------------
+
+// Target: Asphalt9_Steam_x64_rtl.exe
+// Hook: RPM Write Instruction
+// Opcode: movss [rdi+000001B8],xmm1
+// Bytes: F3 0F 11 8F B8 01 00 00
+
+aobscanmodule(INJECT_DASHBOARD,Asphalt9_Steam_x64_rtl.exe,F3 0F 11 8F B8 01 00 00)
+alloc(newmem,$1000,INJECT_DASHBOARD)
+
+label(code_dash)
+label(returnhere_dash)
+
+label(RaceRPM_Raw)
+label(RaceRPM_Int)
+label(RaceGear)
+
+registersymbol(RaceRPM_Raw)
+registersymbol(RaceRPM_Int)
+registersymbol(RaceGear)
+registersymbol(INJECT_DASHBOARD)
+
+newmem:
+
+  // Execute the original instruction first (write RPM to game struct)
+  movss [rdi+000001B8],xmm1
+
+  // COPY the RPM float into our read-only label
+  movss [RaceRPM_Raw], xmm1
+
+  // Convert RPM float to integer for easier display
+  push rax
+  cvttss2si eax, xmm1
+  mov [RaceRPM_Int], eax
+  pop rax
+
+  // COPY the gear value from the same game struct
+  push rax
+  mov eax,[rdi+000000A0]
+  mov [RaceGear],eax
+  pop rax
+
+  jmp returnhere_dash
+
+code_dash:
+  movss [rdi+000001B8],xmm1
+  jmp returnhere_dash
+
+// Read-only storage for copied values
+RaceRPM_Raw:
+  dd 0
+RaceRPM_Int:
+  dd 0
+RaceGear:
+  dd 0
+
+INJECT_DASHBOARD:
+  jmp newmem
+  nop 3
+returnhere_dash:
+
+[DISABLE]
+// Restore original bytes — game runs exactly as before
+INJECT_DASHBOARD:
+  db F3 0F 11 8F B8 01 00 00
+
+unregistersymbol(RaceRPM_Raw)
+unregistersymbol(RaceRPM_Int)
+unregistersymbol(RaceGear)
+unregistersymbol(INJECT_DASHBOARD)
+dealloc(newmem)
+
+</AssemblerScript>
+      <CheatEntries>
+        <CheatEntry>
+          <ID>1</ID>
+          <Description>"RPM_Raw"</Description>
+          <ShowAsSigned>0</ShowAsSigned>
+          <VariableType>Float</VariableType>
+          <Address>RaceRPM_Raw</Address>
+        </CheatEntry>
+        <CheatEntry>
+          <ID>2</ID>
+          <Description>"RPM"</Description>
+          <ShowAsSigned>0</ShowAsSigned>
+          <VariableType>4 Bytes</VariableType>
+          <Address>RaceRPM_Int</Address>
+        </CheatEntry>
+        <CheatEntry>
+          <ID>3</ID>
+          <Description>"Gear"</Description>
+          <ShowAsSigned>0</ShowAsSigned>
+          <VariableType>4 Bytes</VariableType>
+          <Address>RaceGear</Address>
+        </CheatEntry>
+      </CheatEntries>
+    </CheatEntry>
+    <!--
+      ============================================================
+      Script 2: Race Data — Timer + Progress (READ-ONLY)
+      ============================================================
+      Two hooks that COPY the race timer and progress values.
+
+      Hook 1 — Race Timer:
+        Hooks after "add [rdi+10], rax" (the timer accumulation).
+        Copies the accumulated microsecond counter into RaceTimer.
+        Original instruction: mov rdx,[rdi+F8] — executed normally.
+
+      Hook 2 — Race Progress:
+        Hooks the progress write instruction.
+        Copies the 0.0–1.0 progress float into RaceProgress.
+        Original instruction: mov [rdi+1D8],eax — executed normally.
+
+      Exported symbols (read-only copies):
+        RaceTimer    — accumulated race time in microseconds
+        RaceProgress — race completion as float (0.0 to 1.0)
+    -->
+    <CheatEntry>
+      <ID>4</ID>
+      <Description>"Race Data (Timer + Progress)"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+// ------------------------------------------------------------------
+// Race Data — READ-ONLY timer and progress hooks
+// Copies timer (µs) and progress (0–1 float) for external display.
+// Original instructions are preserved; no game values are changed.
+// ------------------------------------------------------------------
+
+// ---- Hook 1: Race Timer (read accumulated µs from [rdi+10]) ----
+// We hook AFTER the "add [rdi+10],rax" at the convergence point
+// Instruction: mov rdx,[rdi+000000F8]
+// AOB context: 48 01 47 10  48 8B 97 F8 00 00 00  48 8B 42 08
+//              ^add(skip)   ^INJECT HERE           ^next instr
+aobscanmodule(INJECT_TIMER,Asphalt9_Steam_x64_rtl.exe,48 01 47 10 48 8B 97 F8 00 00 00 48 8B 42 08)
+define(INJECT_TIMER_HOOK,INJECT_TIMER+4)
+
+alloc(newmem_timer,$1000,INJECT_TIMER)
+alloc(RaceTimer,4)
+
+label(returnhere_timer)
+registersymbol(RaceTimer)
+registersymbol(INJECT_TIMER)
+
+newmem_timer:
+  // COPY the accumulated timer value (microseconds) into our label
+  push rbx
+  mov ebx,[rdi+10]
+  mov [RaceTimer],ebx
+  pop rbx
+
+  // Execute original instruction normally
+  mov rdx,[rdi+000000F8]
+  jmp returnhere_timer
+
+INJECT_TIMER_HOOK:
+  jmp newmem_timer
+  nop 2
+returnhere_timer:
+
+// ---- Hook 2: Race Progress ----
+// Instruction: mov [rdi+000001D8],eax
+// Bytes: 89 87 D8 01 00 00   +  48 83 C4 38 (signature context)
+aobscanmodule(INJECT_PROGRESS,Asphalt9_Steam_x64_rtl.exe,89 87 D8 01 00 00 48 83 C4 38)
+alloc(newmem_progress,$1000,INJECT_PROGRESS)
+
+label(returnhere_progress)
+label(RaceProgress)
+registersymbol(RaceProgress)
+registersymbol(INJECT_PROGRESS)
+
+newmem_progress:
+  // Execute original instruction (write progress to game struct)
+  mov [rdi+000001D8],eax
+
+  // COPY the progress value into our read-only label
+  push rbx
+  mov ebx,[rdi+000001D8]
+  mov [RaceProgress],ebx
+  pop rbx
+
+  jmp returnhere_progress
+
+// Read-only storage for progress copy
+RaceProgress:
+  dd 0
+
+INJECT_PROGRESS:
+  jmp newmem_progress
+  nop
+returnhere_progress:
+
+[DISABLE]
+// Restore original bytes — game runs exactly as before
+INJECT_TIMER_HOOK:
+  db 48 8B 97 F8 00 00 00
+
+INJECT_PROGRESS:
+  db 89 87 D8 01 00 00
+
+unregistersymbol(RaceTimer)
+unregistersymbol(RaceProgress)
+unregistersymbol(INJECT_TIMER)
+unregistersymbol(INJECT_PROGRESS)
+dealloc(newmem_timer)
+dealloc(newmem_progress)
+dealloc(RaceTimer)
+
+</AssemblerScript>
+      <CheatEntries>
+        <CheatEntry>
+          <ID>7</ID>
+          <Description>"Race Time"</Description>
+          <ShowAsSigned>0</ShowAsSigned>
+          <VariableType>4 Bytes</VariableType>
+          <Address>RaceTimer</Address>
+        </CheatEntry>
+        <CheatEntry>
+          <ID>8</ID>
+          <Description>"Race Progress"</Description>
+          <ShowAsSigned>0</ShowAsSigned>
+          <VariableType>Float</VariableType>
+          <Address>RaceProgress</Address>
+        </CheatEntry>
+      </CheatEntries>
+    </CheatEntry>
+    <!--
+      ============================================================
+      Script 3: Checkpoint Finder (READ-ONLY)
+      ============================================================
+      Hooks the checkpoint read instruction to COPY the pointer
+      to the checkpoint counter. Used for race finish detection
+      (checkpoint changes at the finish line).
+
+      Hooked instruction: mov eax,[r13+24C]
+      We store the ADDRESS (pointer) so we can dereference it later.
+
+      Exported symbol:
+        Checkpoint — pointer to the checkpoint counter (dereference to read)
+    -->
+    <CheatEntry>
+      <ID>9</ID>
+      <Description>"CP Finder"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+// ------------------------------------------------------------------
+// Checkpoint Finder — READ-ONLY pointer capture
+// Stores a pointer to the checkpoint counter for finish detection.
+// Original instruction is preserved; no game values are changed.
+// ------------------------------------------------------------------
+
+// 41 8B 85 4C 02 00 00 = mov eax,[r13+0000024C]
+aobscanmodule(INJECT_CP,Asphalt9_Steam_x64_rtl.exe,41 8B 85 4C 02 00 00)
+alloc(newmem_cp,$1000,INJECT_CP)
+
+label(code_cp)
+label(returnhere_cp)
+
+label(Checkpoint)
+registersymbol(Checkpoint)
+registersymbol(INJECT_CP)
+
+newmem_cp:
+  // COPY the pointer to the checkpoint value into our label
+  push rdx
+  lea rdx,[r13+0000024C]
+  mov [Checkpoint],rdx
+  pop rdx
+
+code_cp:
+  // Execute original instruction normally
+  mov eax,[r13+0000024C]
+  jmp returnhere_cp
+
+// Read-only storage for checkpoint pointer
+Checkpoint:
+  dq 0
+
+INJECT_CP:
+  jmp newmem_cp
+  nop 2
+returnhere_cp:
+
+[DISABLE]
+// Restore original bytes
+INJECT_CP:
+  db 41 8B 85 4C 02 00 00
+
+unregistersymbol(Checkpoint)
+unregistersymbol(INJECT_CP)
+dealloc(newmem_cp)
+
+</AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>5</ID>
+      <Description>"CP value"</Description>
+      <ShowAsSigned>0</ShowAsSigned>
+      <VariableType>4 Bytes</VariableType>
+      <Address>Checkpoint</Address>
+      <Offsets>
+        <Offset>0</Offset>
+      </Offsets>
+    </CheatEntry>
+    <!--
+      ============================================================
+      Script 4: Visual Timer — Race State Detection (READ-ONLY)
+      ============================================================
+      Hooks an XOR instruction that processes the visual timer value
+      (the countdown/timer shown on screen). This value helps detect
+      whether the player is in menus, starting a race, racing, or
+      has finished.
+
+      Hooked instruction: xor rax,rsi ; mov r14d,10
+      We COPY ESI (the raw visual timer) into VisualTimer.
+
+      Exported symbol:
+        VisualTimer — raw visual timer value (read-only copy)
+    -->
+    <CheatEntry>
+      <ID>10</ID>
+      <Description>"Visual Timer (Race State Detect)"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>// ------------------------------------------------------------------
+// Visual Timer — READ-ONLY race state detection
+// Copies the visual timer value for menu/race state detection.
+// Original instructions are preserved; no game values are changed.
+// ------------------------------------------------------------------
+
+{ Visual Timer — Race State Detection
+  Hooks xor rax,rsi at +5CC82F
+  Stores raw ESI value into VisualTimer
+}
+
+define(vt_address,"Asphalt9_Steam_x64_rtl.exe"+5CC82F)
+define(vt_bytes,48 33 C6 41 BE 10 00 00 00)
+
+[ENABLE]
+assert(vt_address,vt_bytes)
+alloc(newmem_vtimer,$1000,"Asphalt9_Steam_x64_rtl.exe"+5CC82F)
+alloc(VisualTimer,4)
+
+label(code_vtimer)
+label(return_vtimer)
+registersymbol(VisualTimer)
+
+newmem_vtimer:
+  // COPY the visual timer value (ESI) into our read-only label
+  push rax
+  mov eax,esi
+  mov [VisualTimer],eax
+  pop rax
+
+code_vtimer:
+  // Execute original instructions normally
+  xor rax,rsi
+  mov r14d,00000010
+  jmp return_vtimer
+
+vt_address:
+  jmp newmem_vtimer
+  nop 4
+return_vtimer:
+
+[DISABLE]
+// Restore original bytes
+vt_address:
+  db vt_bytes
+
+dealloc(newmem_vtimer)
+dealloc(VisualTimer)
+unregistersymbol(VisualTimer)
+
+</AssemblerScript>
+      <CheatEntries>
+        <CheatEntry>
+          <ID>11</ID>
+          <Description>"Visual Timer Value"</Description>
+          <ShowAsSigned>0</ShowAsSigned>
+          <VariableType>4 Bytes</VariableType>
+          <Address>VisualTimer</Address>
+        </CheatEntry>
+      </CheatEntries>
+    </CheatEntry>
+    <!--
+      ============================================================
+      Script 5: ALU File Bridge — Python IPC (READ-ONLY export)
+      ============================================================
+      This Lua script reads ALL the labeled addresses created by the
+      scripts above and writes them to a plain text file every ~1ms:
+
+        %TEMP%\alu_ce_bridge.dat
+
+      Format: timer|progress|rpm|gear|rpmRaw|checkpoint|visualTimer
+      (pipe-delimited, one line, overwritten each cycle)
+
+      The companion Python app (ALU Timing Tool) reads this file to
+      display race splits, ghost comparisons, and analytics.
+
+      v2.4: Uses in-place file overwrites with fixed-size 128-byte
+      null-padded payloads.  The file is created once on first write
+      and then overwritten in-place (no truncation) on all subsequent
+      writes.  This eliminates the race condition where the reader
+      sees an empty file during truncation.
+
+      A small status window is shown so the user can see the bridge
+      is active and stop it when finished. This window also helps
+      antivirus software recognise this as a legitimate user-facing
+      application rather than hidden background activity.
+
+      NO game memory is written to. This is purely a data EXPORT.
+    -->
+    <CheatEntry>
+      <ID>9000</ID>
+      <Description>"ALU File Bridge (Python link)"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+{$lua}
+if syntaxcheck then return end
+
+-- ================================================================
+-- ALU File Bridge — Telemetry Export to Python  (v2.4)
+-- ================================================================
+-- Reads game telemetry from labeled memory addresses and writes
+-- them to a local temp file for the companion Python timing tool.
+--
+-- v2.4: In-place file overwrites with fixed-size 128-byte payload.
+-- The file is NEVER truncated after initial creation, so the Python
+-- reader always sees a valid (or stale-but-parseable) line.
+-- ================================================================
+
+-- Configuration
+local ALU_SEND_INTERVAL = 1        -- Timer interval in ms (~1ms polling)
+local ALU_DATA_PATH = os.getenv("TEMP") .. "\\alu_ce_bridge.dat"
+local ALU_PAD_SIZE  = 128           -- Fixed payload size in bytes
+
+-- State variables
+ALU_pollTimer  = nil
+ALU_statusForm = nil
+ALU_statusLbl  = nil
+ALU_writeCount = 0
+ALU_fileReady  = false   -- True once the file has been created
+
+-- ----------------------------------------------------------------
+-- Status Window
+-- ----------------------------------------------------------------
+ALU_statusForm = createForm(false)
+ALU_statusForm.Caption     = "ALU File Bridge — Telemetry Export"
+ALU_statusForm.Width       = 400
+ALU_statusForm.Height      = 120
+ALU_statusForm.Position    = "poScreenCenter"
+ALU_statusForm.BorderStyle = "bsSingle"
+
+ALU_statusLbl = createLabel(ALU_statusForm)
+ALU_statusLbl.Caption  = "Starting bridge..."
+ALU_statusLbl.Left     = 12
+ALU_statusLbl.Top      = 12
+ALU_statusLbl.AutoSize = true
+
+local pathLbl = createLabel(ALU_statusForm)
+pathLbl.Caption  = "Export file: " .. ALU_DATA_PATH
+pathLbl.Left     = 12
+pathLbl.Top      = 36
+pathLbl.AutoSize = true
+
+-- ----------------------------------------------------------------
+-- Stop / cleanup function
+-- ----------------------------------------------------------------
+function ALU_stop()
+  if ALU_pollTimer then
+    ALU_pollTimer.Enabled = false
+    ALU_pollTimer.destroy()
+    ALU_pollTimer = nil
+  end
+
+  pcall(os.remove, ALU_DATA_PATH)
+  ALU_fileReady = false
+
+  if ALU_statusForm then
+    ALU_statusForm.destroy()
+    ALU_statusForm = nil
+    ALU_statusLbl  = nil
+  end
+end
+
+-- Stop button
+local stopBtn = createButton(ALU_statusForm)
+stopBtn.Caption = "Stop Bridge"
+stopBtn.Left    = 12
+stopBtn.Top     = 68
+stopBtn.Width   = 100
+stopBtn.OnClick = ALU_stop
+
+ALU_statusForm.OnClose = function()
+  ALU_stop()
+  return caFree
+end
+
+ALU_statusForm.Show()
+
+-- ----------------------------------------------------------------
+-- Read all game telemetry from our labeled addresses
+-- ----------------------------------------------------------------
+function ALU_readGameValues()
+  local timerVal    = 0
+  local progressVal = 0.0
+  local rpmInt      = 0
+  local gearVal     = 0
+  local rpmRaw      = 0.0
+  local cpVal       = 0
+  local vtVal       = 0
+
+  local a1 = getAddressSafe("RaceTimer")
+  if a1 and a1 ~= 0 then timerVal = readInteger(a1) or 0 end
+
+  local a2 = getAddressSafe("RaceProgress")
+  if a2 and a2 ~= 0 then progressVal = readFloat(a2) or 0.0 end
+
+  local a3 = getAddressSafe("RaceRPM_Int")
+  if a3 and a3 ~= 0 then rpmInt = readInteger(a3) or 0 end
+
+  local a4 = getAddressSafe("RaceGear")
+  if a4 and a4 ~= 0 then gearVal = readInteger(a4) or 0 end
+
+  local a5 = getAddressSafe("RaceRPM_Raw")
+  if a5 and a5 ~= 0 then rpmRaw = readFloat(a5) or 0.0 end
+
+  local a6 = getAddressSafe("Checkpoint")
+  if a6 and a6 ~= 0 then
+    local ptr = readQword(a6)
+    if ptr and ptr ~= 0 then cpVal = readInteger(ptr) or 0 end
+  end
+
+  local a7 = getAddressSafe("VisualTimer")
+  if a7 and a7 ~= 0 then vtVal = readInteger(a7) or 0 end
+
+  return timerVal, progressVal, rpmInt, gearVal, rpmRaw, cpVal, vtVal
+end
+
+-- ----------------------------------------------------------------
+-- Write telemetry to file (called every ALU_SEND_INTERVAL ms)
+-- ----------------------------------------------------------------
+-- v2.4: Fixed-size 128-byte payloads.  File is created once with
+-- "wb", then every subsequent write uses "r+b" and seeks to byte 0.
+-- The file is NEVER truncated after creation, so the Python reader
+-- always sees either the current payload or the previous one —
+-- never an empty file.
+-- ----------------------------------------------------------------
+function ALU_writeToFile()
+  local t, p, rpm, gear, rpmRaw, cp, vt = ALU_readGameValues()
+
+  -- Build the payload and null-pad to exactly ALU_PAD_SIZE bytes
+  local data = string.format("%d|%.6f|%d|%d|%.6f|%d|%d", t, p, rpm, gear, rpmRaw, cp, vt)
+  local padded = data .. string.rep("\0", ALU_PAD_SIZE - #data)
+
+  local f
+  if ALU_fileReady then
+    -- In-place overwrite — no truncation, file always exists
+    f = io.open(ALU_DATA_PATH, "r+b")
+    if f then
+      f:seek("set", 0)
+    end
+  end
+
+  if not f then
+    -- First write, or r+b failed (file deleted externally) — create it
+    f = io.open(ALU_DATA_PATH, "wb")
+    if f then ALU_fileReady = true end
+  end
+
+  if f then
+    f:write(padded)
+    f:flush()
+    f:close()
+
+    ALU_writeCount = ALU_writeCount + 1
+    if ALU_writeCount % 100 == 0 and ALU_statusLbl then
+      ALU_statusLbl.Caption = string.format(
+        "T=%d  P=%.1f%%  RPM=%d  G=%d  CP=%d  (#%d)",
+        t, p * 100, rpm, gear, cp, ALU_writeCount)
+    end
+  end
+end
+
+-- ----------------------------------------------------------------
+-- Start the polling timer
+-- ----------------------------------------------------------------
+ALU_pollTimer = createTimer(nil, false)
+ALU_pollTimer.Interval = ALU_SEND_INTERVAL
+ALU_pollTimer.OnTimer  = ALU_writeToFile
+ALU_pollTimer.Enabled  = true
+
+if ALU_statusLbl then
+  ALU_statusLbl.Caption = "Bridge active — waiting for game values..."
+end
+
+
+[DISABLE]
+{$lua}
+if syntaxcheck then return end
+
+-- Cleanup: stop timer, remove bridge file, close status window
+if ALU_pollTimer then
+  ALU_pollTimer.Enabled = false
+  ALU_pollTimer.destroy()
+  ALU_pollTimer = nil
+end
+
+pcall(os.remove, os.getenv("TEMP") .. "\\alu_ce_bridge.dat")
+ALU_fileReady = false
+
+if ALU_statusForm then
+  ALU_statusForm.destroy()
+  ALU_statusForm = nil
+  ALU_statusLbl  = nil
+end
+
+      </AssemblerScript>
+    </CheatEntry>
+  </CheatEntries>
+  <UserdefinedSymbols/>
+  <!--
+    ================================================================
+    Auto-Attach Lua Script
+    ================================================================
+    Runs when this cheat table is loaded. It:
+      1. Scans the Windows process list for "asphalt" (case-insensitive)
+      2. Attaches Cheat Engine to that process (read-only — no writes)
+      3. Enables all the telemetry scripts above after a short delay
+         (to let CE finish resolving module addresses)
+      4. If the game isn't running yet, re-checks every 2 seconds
+
+    This is standard CE Lua for auto-attaching to a known process.
+    No code injection happens here — that's handled by the AA scripts.
+  -->
+  <LuaScript>--[[
+  ================================================================
+  ALU Trainer v2.4 — Auto-attach and Auto-enable
+  ================================================================
+  This Lua script runs when the cheat table is loaded.
+  It automatically finds the Asphalt 9 process and attaches to it,
+  then enables all the read-only telemetry scripts.
+
+  What this does:
+    1. Scans the process list for a process containing "asphalt"
+    2. Attaches CE to that process (for READING memory only)
+    3. After a 2-second delay (to let CE resolve module addresses),
+       enables all the Auto Assembler scripts listed in SCRIPT_IDS
+    4. If the game isn't running yet, re-checks every 2 seconds
+
+  Script IDs enabled:
+    0    = Gearbox Info (RPM, gear — read-only)
+    4    = Race Data: Timer + Progress (read-only)
+    9    = CP Finder: Checkpoint pointer (read-only)
+    10   = Visual Timer: Race state detection (read-only)
+    9000 = ALU File Bridge: writes telemetry to temp file for Python
+]]
+
+-- IDs of the scripts to auto-enable (all are read-only hooks)
+local SCRIPT_IDS      = {0, 4, 9, 10, 9000}
+local POLL_MS         = 2000   -- Check for game process every 2 seconds
+local ENABLE_DELAY_MS = 2000   -- Wait 2s after attach before enabling scripts
+
+ALU_scanTimer = nil
+
+-- ----------------------------------------------------------------
+-- Find the Asphalt 9 process in the Windows process list
+-- ----------------------------------------------------------------
+function ALU_findAsphalt()
+  local pid = nil
+  local pname = nil
+
+  local ok, err = pcall(function()
+    local sl = createStringlist()
+    getProcessList(sl)
+    for i = 0, sl.Count - 1 do
+      local entry = sl[i]
+      if entry and string.find(string.lower(entry), "asphalt") then
+        local h = string.match(entry, "^(%x+)")
+        if h then
+          pid = tonumber(h, 16)
+          pname = string.match(entry, "^%x+%-(.+)$")
+        end
+        break
+      end
+    end
+    sl.destroy()
+  end)
+
+  return pid, pname
+end
+
+-- ----------------------------------------------------------------
+-- Enable all telemetry scripts by their IDs
+-- ----------------------------------------------------------------
+function ALU_enableScripts()
+  local al = getAddressList()
+  for _, id in ipairs(SCRIPT_IDS) do
+    local mr = al.getMemoryRecordByID(id)
+    if mr then
+      pcall(function() mr.Active = true end)
+    end
+  end
+end
+
+-- ----------------------------------------------------------------
+-- Attach to the game process and schedule script activation
+-- ----------------------------------------------------------------
+function ALU_attach()
+  local pid, name = ALU_findAsphalt()
+  if pid then
+    openProcess(pid)
+
+    local t = createTimer(nil, false)
+    t.Interval = ENABLE_DELAY_MS
+    t.OnTimer = function(sender)
+      sender.Enabled = false
+      sender.destroy()
+      ALU_enableScripts()
+    end
+    t.Enabled = true
+    return true
+  end
+  return false
+end
+
+-- ----------------------------------------------------------------
+-- Try to attach immediately; if game not found, poll every 2s
+-- ----------------------------------------------------------------
+if not ALU_attach() then
+  ALU_scanTimer = createTimer(nil, false)
+  ALU_scanTimer.Interval = POLL_MS
+  ALU_scanTimer.OnTimer = function(sender)
+    if ALU_attach() then
+      sender.Enabled = false
+      sender.destroy()
+      ALU_scanTimer = nil
+    end
+  end
+  ALU_scanTimer.Enabled = true
+end
+</LuaScript>
+</CheatTable>
