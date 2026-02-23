@@ -104,24 +104,28 @@ class RaceDataManager:
                     if self.current_race_data.get(str(i), "0000000") == "0000000":
                         self.current_race_data[str(i)] = last_time
     
-    def record_final_time(self, time_ms: int):
+    def record_final_time(self, time_ms: int, true_final_ms: int = 0):
         """
         Record the final time at 100% when race completes.
-        Ensures the 100% time is never lower than the 99% time.
+        If the checkpoint-based estimate is invalid (less than 99% time),
+        falls back to true_final_ms - 1000ms.
         
         Args:
-            time_ms: Final time in milliseconds (7 digits, padded with zeros)
+            time_ms: Final time in milliseconds (checkpoint estimate)
+            true_final_ms: The actual last raw timer value (fallback source)
         """
         formatted_time = f"{time_ms:07d}"
         
-        # Get the time at 99% to ensure 100% time is not lower
+        # Get the time at 99% to validate the checkpoint estimate
         time_99 = self.current_race_data.get("99", "0000000")
         if time_99 != "0000000":
             time_99_ms = int(time_99)
             if time_ms < time_99_ms:
-                print(f"Warning: Final time {time_ms}ms is less than 99% time {time_99_ms}ms. Using 99% time for 100%.")
-                formatted_time = time_99
-                time_ms = time_99_ms
+                # Checkpoint estimate is invalid; use true_final - 1000ms
+                fallback_ms = max(true_final_ms - 1000, time_99_ms) if true_final_ms > 0 else time_99_ms
+                print(f"Warning: Checkpoint estimate {time_ms}ms is invalid. Using fallback: {fallback_ms}ms (true_final - 1s)")
+                formatted_time = f"{fallback_ms:07d}"
+                time_ms = fallback_ms
         
         self.current_race_data["100"] = formatted_time
         print(f"Recorded final time at 100%: {time_ms}ms")

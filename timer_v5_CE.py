@@ -292,7 +292,7 @@ class ALUTimingTool:
         # fall back to true final if checkpoint never fired.
         final_time = estimate if estimate > 0 else true_final
         self.estimated_finish_ms = final_time
-        self.race_data_manager.record_final_time(final_time)
+        self.race_data_manager.record_final_time(final_time, true_final)
 
         mode_label = self.ui.get_current_mode()
         print(
