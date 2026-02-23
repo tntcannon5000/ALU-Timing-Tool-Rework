@@ -1,12 +1,17 @@
 """
-Main entry point for the ALU Timing Tool.
+Main entry point for the ALU Timing Tool (CE Backend).
 
-This script initializes and runs the ALU Timing Tool application.
+This script initializes and runs the ALU Timing Tool application,
+receiving game telemetry from Cheat Engine via a shared temp file.
+
+Prerequisites:
+  1. ALU_Trainer_v2.CT open in Cheat Engine (auto-attaches to Asphalt 9)
+     OR: ALU_Trainer_v2.exe trainer running
 """
 
 import sys
 import signal
-from timer_optimize_py_v4 import ALUTimingTool
+from timer_v5_CE import ALUTimingTool
 
 
 def signal_handler(sig, frame):
@@ -21,17 +26,15 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     
     try:
-        print("Initializing ALU Timing Tool...")
+        print("Initializing ALU Timing Tool (CE Backend)...")
         print("=" * 50)
         
-        # Initialize the application
-        app = ALUTimingTool(
-            window_name="asphalt",  # Change this to match your game window
-            confidence_threshold=0.65
-        )
+        # Initialize the application — reads CE bridge file
+        app = ALUTimingTool()
         
         print("=" * 50)
         print("ALU Timing Tool initialized successfully!")
+        print("Reading game telemetry from CE bridge file.")
         print("Press Ctrl+C to stop the application.")
         print("=" * 50)
         

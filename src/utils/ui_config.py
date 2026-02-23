@@ -226,7 +226,7 @@ class UIConfigManager:
             Tkinter geometry string (e.g., "300x120+100+100")
         """
         pos = config.get("window_position", {"x": 100, "y": 100})
-        size = config.get("window_size", {"width": 300, "height": 120})
+        size = config.get("window_size", {"width": 300, "height": 40})
         
         # Validate position
         x, y = self.validate_window_position(pos["x"], pos["y"], size["width"], size["height"])
