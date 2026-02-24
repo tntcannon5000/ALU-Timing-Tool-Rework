@@ -42,7 +42,7 @@ class CheatEngineClient:
         self._lock = threading.Lock()
         self._timer_raw: int = 0
         self._progress_raw: float = 0.0
-        self._rpm: int = 0
+        self._rpm: int = 1250
         self._gear: int = 0
         self._checkpoint: int = 0
         self._visual_timer: int = 0

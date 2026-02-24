@@ -77,7 +77,7 @@ class TimingToolUI:
         self.delta_time = "Rec..."  # Default delta text (CE v5: shows Rec... in record mode)
 
         # Delta display font base size (adjust this to change the main display text size)
-        self.DELTA_FONT_BASE = 55
+        self.DELTA_FONT_BASE = 65
 
         # Scaling adjustment - load from config
         self.current_scaling = self.ui_config.get("scaling", 1.15)
@@ -135,11 +135,11 @@ class TimingToolUI:
         """Toggle window pin state."""
         self.is_pinned = not self.is_pinned
         if self.is_pinned:
-            self.root.wm_attributes("-topmost", True)
-            self.pin_button.config(text="●", bg="#4ecdc4")
-        else:
-            self.root.wm_attributes("-topmost", False)
+        #    self.root.wm_attributes("-topmost", True)
             self.pin_button.config(text="○", bg="#95a5a6")
+        else:
+        #    self.root.wm_attributes("-topmost", False)
+            self.pin_button.config(text="●", bg="#4ecdc4")
 
     def _auto_resize(self):
         """Let Tk compute natural window height based on packed content."""
@@ -224,10 +224,12 @@ class TimingToolUI:
         """Open file dialog to load a ghost file."""
         if self.on_load_ghost:
             filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
+            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "runs")
+            os.makedirs(runs_dir, exist_ok=True)
             filename = filedialog.askopenfilename(
                 title="Load Race Ghost",
                 filetypes=filetypes,
-                initialdir=os.getcwd(),
+                initialdir=runs_dir,
             )
             if filename:
                 self.on_load_ghost(filename)
@@ -236,10 +238,12 @@ class TimingToolUI:
         """Open file dialog to load a split-type ghost file."""
         if hasattr(self, 'on_load_split') and self.on_load_split:
             filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
+            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "runs")
+            os.makedirs(runs_dir, exist_ok=True)
             filename = filedialog.askopenfilename(
                 title="Load Split Race Ghost",
                 filetypes=filetypes,
-                initialdir=os.getcwd(),
+                initialdir=runs_dir,
             )
             if filename:
                 self.on_load_split(filename)
@@ -248,11 +252,13 @@ class TimingToolUI:
         """Open file dialog to save current race data as ghost file."""
         if self.on_save_ghost:
             filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
+            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "runs")
+            os.makedirs(runs_dir, exist_ok=True)
             filename = filedialog.asksaveasfilename(
                 title="Save Current Ghost",
                 filetypes=filetypes,
                 defaultextension=".json",
-                initialdir=os.getcwd(),
+                initialdir=runs_dir,
             )
             if filename:
                 self.on_save_ghost(filename)
@@ -260,23 +266,37 @@ class TimingToolUI:
     def update_ghost_filename(self, filename: str):
         """Update the displayed ghost filename."""
         if self.ghost_filename_label:
-            if filename:
-                self.ghost_filename_label.config(text=filename, fg="#bdc3c7")
-            else:
-                self.ghost_filename_label.config(text="No ghost loaded", fg="#e74c3c")
+            try:
+                if not self.ghost_filename_label.winfo_exists():
+                    return
+                if filename:
+                    self.ghost_filename_label.config(text=filename, fg="#bdc3c7")
+                else:
+                    self.ghost_filename_label.config(text="No ghost loaded", fg="#e74c3c")
+            except tk.TclError:
+                pass
 
     def show_ghost_saved_message(self):
         """Show temporary 'Ghost Saved!' message."""
         if self.ghost_filename_label:
-            original_text = self.ghost_filename_label.cget("text")
-            original_color = self.ghost_filename_label.cget("fg")
-            self.ghost_filename_label.config(text="Ghost Saved!", fg="#2ecc71",
-                                             font=("Helvetica", 9, "bold underline"))
+            try:
+                if not self.ghost_filename_label.winfo_exists():
+                    return
+                original_text = self.ghost_filename_label.cget("text")
+                original_color = self.ghost_filename_label.cget("fg")
+                self.ghost_filename_label.config(text="Ghost Saved!", fg="#2ecc71",
+                                                 font=("Helvetica", 9, "bold underline"))
+            except tk.TclError:
+                return
 
             def restore_text():
                 if self.ghost_filename_label:
-                    self.ghost_filename_label.config(text=original_text, fg=original_color,
-                                                     font=("Helvetica", 9))
+                    try:
+                        if self.ghost_filename_label.winfo_exists():
+                            self.ghost_filename_label.config(text=original_text, fg=original_color,
+                                                             font=("Helvetica", 9))
+                    except tk.TclError:
+                        pass
 
             if self.root:
                 self.root.after(1000, restore_text)
@@ -284,10 +304,15 @@ class TimingToolUI:
     def update_save_ghost_button_state(self):
         """Update save ghost button state based on race completion."""
         if hasattr(self, 'save_ghost_button') and self.save_ghost_button:
-            if self.race_data_manager and self.race_data_manager.is_race_complete():
-                self.save_ghost_button.config(state="normal", bg="#f39c12")
-            else:
-                self.save_ghost_button.config(state="disabled", bg="#7f8c8d")
+            try:
+                if not self.save_ghost_button.winfo_exists():
+                    return
+                if self.race_data_manager and self.race_data_manager.data_exists():
+                    self.save_ghost_button.config(state="normal", bg="#f39c12")
+                else:
+                    self.save_ghost_button.config(state="disabled", bg="#7f8c8d")
+            except tk.TclError:
+                pass
 
     # ──────────────────────────────────────────────────────────────────────
     #  Split view
@@ -564,11 +589,11 @@ class TimingToolUI:
         """Update UI background color based on race mode and delta."""
         if mode == "race" and delta is not None:
             if delta < 0:
-                bg_color = "#2d5a3d"  # green — ahead
+                bg_color = "#007000"  # green — ahead
             elif delta > 0:
-                bg_color = "#5a2d2d"  # red — behind
+                bg_color = "#700000"  # red — behind
             else:
-                bg_color = "#2d3a5a"  # blue — even
+                bg_color = "#000050"  # blue — even
         else:
             bg_color = "#2c3e50"
 
@@ -620,6 +645,7 @@ class TimingToolUI:
             tk.Button(button_frame, text="Cancel", command=dialog.destroy,
                       bg="#e74c3c", fg="white", width=8).pack(side="left", padx=5)
             entry.bind('<Return>', lambda _: save_and_close())
+            self.root.after(30000, lambda: dialog.destroy())  # Auto-close after 30 seconds to prevent orphaned dialogs
 
     # ──────────────────────────────────────────────────────────────────────
     #  App lifecycle
@@ -696,10 +722,10 @@ class TimingToolUI:
             print(f"Error adjusting scaling: {e}")
 
     def increase_scaling(self):
-        self.adjust_scaling(0.05)
+        self.adjust_scaling(0.01)
 
     def decrease_scaling(self):
-        self.adjust_scaling(-0.05)
+        self.adjust_scaling(-0.01)
 
     def reset_scaling(self):
         if not self.root:
@@ -716,10 +742,14 @@ class TimingToolUI:
     # ──────────────────────────────────────────────────────────────────────
 
     def start_drag(self, event):
+        if self.is_pinned: # Don't allow dragging when pinned
+            return
         self.start_x = event.x
         self.start_y = event.y
 
     def on_drag(self, event):
+        if self.is_pinned: # Don't allow dragging when pinned
+            return
         x = self.root.winfo_x() + (event.x - self.start_x)
         y = self.root.winfo_y() + (event.y - self.start_y)
         self.root.geometry(f"+{x}+{y}")
@@ -819,7 +849,7 @@ class TimingToolUI:
 
         # Pin button
         pin_text = "●" if self.is_pinned else "○"
-        pin_bg = "#4ecdc4" if self.is_pinned else "#95a5a6"
+        pin_bg = "#95a5a6" if self.is_pinned else "#4ecdc4"
         self.pin_button = tk.Button(
             button_section, text=pin_text, command=self.toggle_pin,
             bg=pin_bg, fg="white", font=("Helvetica", 11, "bold"),
@@ -980,7 +1010,8 @@ class TimingToolUI:
         self.mode_var = tk.StringVar(value="record")
         self.mode_combobox = ttk.Combobox(
             mode_frame, textvariable=self.mode_var,
-            values=["record", "race", "splits"],
+        #    values=["record", "race", "splits"],
+            values=["record", "race"],
             state="readonly", width=18,
         )
         self.mode_combobox.pack(anchor="w", pady=(2, 0))
@@ -1127,13 +1158,18 @@ class TimingToolUI:
         try:
             current_mode = self.get_current_mode()
             if current_mode == "race" or current_mode == "splits":
-                self.delta_label.config(text=self.delta_time)
+                if self.delta_time and self.delta_time != "−−.−−−":
+                    self.delta_label.config(text=self.delta_time, font=("Franklin Gothic Heavy", 90))
+                elif self.current_timer_display == "00:00.000":
+                    self.delta_label.config(text="Race Mode", font=("Helvetica", 50))
+                else:
+                    self.delta_label.config(text=self.current_timer_display, font=("Helvetica", 65))
             else:
                 # Record mode: show live timer or "Rec..."
                 if self.current_timer_display and self.current_timer_display != "00:00.000":
-                    self.delta_label.config(text=self.current_timer_display)
+                    self.delta_label.config(text=self.current_timer_display, font=("Helvetica", 65))
                 else:
-                    self.delta_label.config(text="Rec...")
+                    self.delta_label.config(text="Record Mode", font=("Helvetica", 50))
 
             # Debug info (only when expanded)
             if self.debug_expanded:
