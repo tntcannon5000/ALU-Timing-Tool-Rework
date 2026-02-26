@@ -4,6 +4,7 @@
 # Window detection (win32gui, win32api)
 pywin32>=311
 numpy>=2.4
+pymem>=1.14
 
 # Environment configuration
 python-dotenv>=1.0

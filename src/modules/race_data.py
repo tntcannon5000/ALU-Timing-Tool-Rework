@@ -33,7 +33,9 @@ class RaceDataManager:
         self.is_split_loaded: bool = False
         self.next_split_index: Optional[float] = None  # index of the next split
         self.new_split_available: bool = False
-        
+        # Ensure runs/ directory exists
+        self.runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "runs")
+        os.makedirs(self.runs_dir, exist_ok=True)
         # Initialize empty race data for all percentages (0-100)
         self.reset_race_data()
     
@@ -89,13 +91,13 @@ class RaceDataManager:
         self.new_split_available = True
         self.no_new_data = False
     
-    def save_split_data(self, filepath: Optional[str] = None) -> bool:
+    def save_split_data(self) -> bool:
         """
         Save the current split ghost back to JSON. If filepath is None, uses the
         last-loaded split filepath. Returns True on success.
         """
         try:
-            target = filepath if filepath else self.split_filepath
+            target = self.ghost_filename
             if not target:
                 print("No target filepath provided to save split data")
                 return False
@@ -142,12 +144,8 @@ class RaceDataManager:
             if not filename.endswith('.json'):
                 filename += '.json'
             
-            # Ensure runs/ directory exists
-            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "runs")
-            os.makedirs(runs_dir, exist_ok=True)
-            
             # Build full path in runs/ folder
-            filepath = os.path.join(runs_dir, os.path.basename(filename))
+            filepath = os.path.join(self.runs_dir, os.path.basename(filename))
 
             # Save to file
             with open(filepath, 'w') as f:
@@ -183,7 +181,8 @@ class RaceDataManager:
             self.splits = data['splits'] if 'splits' in data else None
             self.is_split_loaded = self.split_progress is not None and self.split_times is not None
             self.ghost_splits =  self.get_ghost_splits()
-            self.ghost_filename = os.path.splitext(os.path.basename(filepath))[0]
+            #self.ghost_filename = os.path.splitext(os.path.basename(filepath))[0]
+            self.ghost_filename = filepath
             if self.ghost_splits is not None:
                 self.new_split_available = True
             return True
@@ -247,7 +246,7 @@ class RaceDataManager:
             times_end = np.add(times_end, offset)
         self.split_times = np.concatenate((times_beginning, times_middle, times_end))
         self.split_progress = np.concatenate((prog_beginning, prog_middle, prog_end))
-        self.save_split_data(self.ghost_filename)
+        self.save_split_data()
 
     def handle_split_reached(self, progress: float, time_us: int):
         """
@@ -367,7 +366,7 @@ class RaceDataManager:
     
     def get_ghost_filename(self) -> Optional[str]:
         """Get the filename of the currently loaded ghost."""
-        return self.ghost_filename
+        return os.path.splitext(os.path.basename(self.ghost_filename))[0]
     
     def unload_ghost(self):
         """Unload the current ghost data."""
