@@ -6,6 +6,7 @@ This module handles saving and loading race ghost data for timing comparisons.
 
 import json
 import os
+from posixpath import split
 import numpy as np
 from typing import Dict, Optional, List
 
@@ -24,10 +25,14 @@ class RaceDataManager:
         self.ghost_filename: Optional[str] = None
         self.no_new_data: bool = True
         # Split-file related data
-        self.split_filepath: Optional[str] = None
-        self.splits: Optional[list] = None  # normalized list of {'name':str,'percent':int}
-        self.split_times: Optional[Dict[str, int]] = None
+        self.current_splits: Optional[list] = None # contains the RAW time values at which each of the current splits are recorded
+        self.ghost_splits: Optional[list] = None # contains the DURATION of the split in the loaded ghost
+        self.splits: Optional[list] = None  # list of [string name, float progress] lists
+        self.split_progress: Optional[np.ndarray] = None
+        self.split_times: Optional[np.ndarray] = None
         self.is_split_loaded: bool = False
+        self.next_split_index: Optional[float] = None  # index of the next split
+        self.new_split_available: bool = False
         
         # Initialize empty race data for all percentages (0-100)
         self.reset_race_data()
@@ -36,6 +41,9 @@ class RaceDataManager:
         """Reset the current race data to empty."""
         self.current_progress_data = np.array([0.0])
         self.current_time_data = np.array([0])
+        self.current_splits = []
+        self.next_split_index = 0
+
     
     def data_exists(self) -> bool:
         """Check if any race data has been recorded for the current race."""
@@ -56,7 +64,8 @@ class RaceDataManager:
             if time_us == 0 and progress != 0:
                 print(f"Warning: Ignoring invalid time 00.00.000 at {round(progress*100,2)}% (can only be at 0%)")
                 return
-            
+            if self.splits is not None and progress >= self.splits[self.next_split_index][1]:
+                self.handle_split_reached(progress, time_us)
             self.current_progress_data = np.append(self.current_progress_data, progress)
             self.current_time_data = np.append(self.current_time_data, time_us)
             self.no_new_data = False
@@ -70,11 +79,44 @@ class RaceDataManager:
             time_us: Final time in microseconds (10 digits, padded with zeros)
         """
         
-        self.current_progress_data = np.append(self.current_progress_data, 1.0)
-        self.current_time_data = np.append(self.current_time_data, time_us)
+        if self.splits is not None:
+            self.handle_split_reached(1.0, time_us)
+        else:
+            self.current_progress_data = np.append(self.current_progress_data, 1.0)
+            self.current_time_data = np.append(self.current_time_data, time_us)
         print(f"Recorded final time at 100%: {time_us}us")
+        self.ghost_splits = self.get_ghost_splits()
+        self.new_split_available = True
         self.no_new_data = False
     
+    def save_split_data(self, filepath: Optional[str] = None) -> bool:
+        """
+        Save the current split ghost back to JSON. If filepath is None, uses the
+        last-loaded split filepath. Returns True on success.
+        """
+        try:
+            target = filepath if filepath else self.split_filepath
+            if not target:
+                print("No target filepath provided to save split data")
+                return False
+
+            data = {
+                "fingerprint": "ALU_TOOL",
+                "progress": self.ghost_progress_data.tolist() if self.ghost_progress_data is not None else self.current_progress_data.tolist(),
+                "times": self.ghost_time_data.tolist() if self.ghost_time_data is not None else self.current_time_data.tolist(),
+                "split_progress": self.split_progress.tolist() if self.split_progress is not None else self.current_progress_data.tolist(),
+                "split_times": self.split_times.tolist() if self.split_times is not None else self.current_time_data.tolist(),
+                "splits": self.splits if self.splits is not None else None
+            }
+
+            with open(target, 'w') as f:
+                json.dump(data, f, indent=2)
+
+            return True
+        except Exception as e:
+            print(f"Error saving split data: {e}")
+            return False
+
     def save_race_data(self, filename: str) -> bool:
         """
         Save current race data to a JSON file in the runs/ folder.
@@ -90,7 +132,10 @@ class RaceDataManager:
             race_data = {
                 "fingerprint": "ALU_TOOL",
                 "progress": self.current_progress_data.tolist(),
-                "times": self.current_time_data.tolist()
+                "times": self.current_time_data.tolist(),
+                "split_progress": self.split_progress.tolist() if self.split_progress is not None else self.current_progress_data.tolist(),
+                "split_times": self.split_times.tolist() if self.split_times is not None else self.current_time_data.tolist(),
+                "splits": self.splits if self.splits is not None else None,
             }
             
             # Ensure filename has .json extension
@@ -128,91 +173,99 @@ class RaceDataManager:
                 data = json.load(f)
             
             # Validate the file
-            if not self._validate_ghost_file(data):
+            if not self._validate_split_file(data):
                 return False
             
             self.ghost_progress_data = np.array(data['progress'])
             self.ghost_time_data = np.array(data['times'])
+            self.split_progress = np.array(data['split_progress']) if 'split_progress' in data else None
+            self.split_times = np.array(data['split_times']) if 'split_times' in data else None
+            self.splits = data['splits'] if 'splits' in data else None
+            self.is_split_loaded = self.split_progress is not None and self.split_times is not None
+            self.ghost_splits =  self.get_ghost_splits()
             self.ghost_filename = os.path.splitext(os.path.basename(filepath))[0]
+            if self.ghost_splits is not None:
+                self.new_split_available = True
             return True
             
         except Exception as e:
             print(f"Error loading ghost data: {e}")
             return False
     
-    def _validate_ghost_file(self, data: dict) -> bool:
+    def get_ghost_splits(self) -> Optional[list]:
         """
-        Validate that a ghost file has the correct format.
-        
-        Args:
-            data: Loaded JSON data
-            
-        Returns:
-            True if valid, False otherwise
+        Return the list of ghost splits for this race.
         """
-        # Check for fingerprint
-        if data.get('fingerprint') != 'ALU_TOOL':
-            print("Invalid file: Missing or incorrect fingerprint")
-            return False
-        
-        # Check for progress data
-        progress = data.get('progress', [])
-        if not isinstance(progress, list):
-            print("Invalid file: Progress data must be a list")
-            return False
-        
-        # Check for times data
-        times = data.get('times', [])
-        if not isinstance(times, list):
-            print("Invalid file: Times data must be a list")
-            return False
-
-        return True
-
-    # --- Split file support ---
-    def _normalize_splits(self, raw_splits) -> Optional[list]:
-        """
-        Normalize various allowed splits formats into a list of dicts:
-        - list of percentages: [25,50,75,99]
-        - dict mapping keys->percent: {"1":25,...}
-        - list of pairs [name,percent]: [["first",50],["second",99]]
-
-        Returns list of {'name': str, 'percent': int} or None if invalid.
-        """
-        if raw_splits is None:
+        try:
+            ghost_split_times = []
+            #ghost_split_times.append(self.split_times[np.where(self.split_progress == self.splits[0][1])[0][0]])
+            ghost_split_times.append(int(self.split_times[self.split_progress == self.splits[0][1]][0]))
+            print(self.splits)
+            print("First ghost split time:", ghost_split_times[0])
+            for i in range(len(self.splits)-1):
+                prev = self.splits[i]
+                current = self.splits[i+1]
+                #timestart = self.split_times[np.where(self.split_progress == prev[1])[0][0]]
+                #timeend = self.split_times[np.where(self.split_progress == current[1])[0][0]]
+                timestart = int(self.split_times[self.split_progress == prev[1]][0])
+                timeend = int(self.split_times[self.split_progress == current[1]][0])
+                ghost_split_times.append(timeend - timestart)
+            print("Calculated ghost splits:", ghost_split_times)
+            return ghost_split_times
+        except Exception as e:
+            print(f"Error calculating ghost splits: {e}")
             return None
 
-        normalized = []
-        # List of pairs with names
-        if isinstance(raw_splits, list):
-            for item in raw_splits:
-                if isinstance(item, list) and len(item) == 2:
-                    name, percent = item[0], item[1]
-                    try:
-                        p = int(percent)
-                    except Exception:
-                        return None
-                    normalized.append({"name": str(name), "percent": p})
-                elif isinstance(item, int) or (isinstance(item, str) and item.isdigit()):
-                    # simple percentage list
-                    p = int(item)
-                    normalized.append({"name": f"split_{p}", "percent": p})
-                else:
-                    return None
-
-        elif isinstance(raw_splits, dict):
-            # dict mapping index->percent
-            try:
-                # sort by key to keep deterministic order
-                for k in sorted(raw_splits.keys(), key=lambda x: int(x) if str(x).isdigit() else x):
-                    p = int(raw_splits[k])
-                    normalized.append({"name": str(k), "percent": p})
-            except Exception:
-                return None
+    def save_current_split(self):
+        """
+        Save the current split times into the split_times array, replacing the old split time for the split that was just reached.
+        Also updates the split_progress and splits arrays to ensure they are consistent with the new split times.
+        """
+        new_split = self.splits[self.next_split_index][1]
+        if self.next_split_index == 0:
+            prog_beginning = [0.0]
+            times_beginning = [0]
+            prev_split = 0.0
         else:
-            return None
+            prev_split = self.splits[self.next_split_index-1][1]
+            prog_beginning = self.split_progress[(self.split_progress <= prev_split)]
+            times_beginning = self.split_times[(self.split_progress <= prev_split)]
+        # set prog_middle to the progress values between the previous split and the new split, and times_middle to the corresponding times from current_time_data, offset by the difference between the old split time and the new split time
+        prog_middle = self.current_progress_data[(self.current_progress_data > prev_split) & (self.current_progress_data <= new_split)]
+        times_middle = self.current_time_data[(self.current_progress_data > prev_split) & (self.current_progress_data <= new_split)]
+        print(prev_split,new_split,len(prog_middle), len(times_middle), len(self.current_progress_data), len(self.current_time_data))
+        offset = times_beginning[len(prog_beginning)-1] - self.current_splits[self.next_split_index-1] if self.next_split_index > 0 else 0
+        times_middle = np.add(times_middle, offset)
+        if self.next_split_index == len(self.splits) - 1:
+            prog_end = []
+            times_end = []
+        else:
+            prog_end = self.split_progress[(self.split_progress > new_split)]
+            times_end = self.split_times[(self.split_progress > new_split)]
+            #offset = times_middle[len(prog_middle)-1] - self.split_times[np.where(self.split_progress == self.splits[self.next_split_index][1])[0][0]]
+            offset = times_middle[len(times_middle)-1] - self.split_times[(self.split_progress == new_split)][0]
+            times_end = np.add(times_end, offset)
+        self.split_times = np.concatenate((times_beginning, times_middle, times_end))
+        self.split_progress = np.concatenate((prog_beginning, prog_middle, prog_end))
+        self.save_split_data(self.ghost_filename)
 
-        return normalized
+    def handle_split_reached(self, progress: float, time_us: int):
+        """
+        Handle logic for when the next split is reached during a race.
+        """
+        time_at_new_split = round(np.interp(self.splits[self.next_split_index][1], 
+                                            np.array([self.current_progress_data[len(self.current_progress_data)-1],progress]), 
+                                            np.array([self.current_time_data[len(self.current_time_data)-1],time_us])))
+        self.current_progress_data = np.append(self.current_progress_data, self.splits[self.next_split_index][1])
+        self.current_time_data = np.append(self.current_time_data, time_at_new_split)
+        try: total_time = time_at_new_split - self.current_splits[self.next_split_index-1]
+        except: total_time = time_at_new_split
+        self.current_splits.append(time_at_new_split)
+        if self.is_split_loaded:
+            if total_time < self.ghost_splits[self.next_split_index]:
+                self.save_current_split()
+        self.new_split_available = True
+        self.next_split_index += 1
 
     def _validate_split_file(self, data: dict) -> bool:
         """
@@ -224,63 +277,35 @@ class RaceDataManager:
             print("Invalid split file: Missing or incorrect fingerprint")
             return False
 
-        times = data.get('times')
-        if not isinstance(times, dict):
-            print("Invalid split file: times must be a dict")
+
+        # Check for progress data
+        progress = data.get('progress', [])
+        if not isinstance(progress, list):
+            print("Invalid file: Progress data must be a list")
             return False
 
+        # Check for times data
+        times = data.get('times', [])
+        if not isinstance(times, list):
+            print("Invalid file: Times data must be a list")
+            return False
+        
         raw_splits = data.get('splits')
-        normalized = self._normalize_splits(raw_splits)
-        if not normalized:
-            print("Invalid split file: splits format not recognized")
+        if raw_splits is not None and not (2 <= len(raw_splits) <= 10):
+            print("File does not contain split configuration with 2-10 splits")
             return False
-
-        if not (2 <= len(normalized) <= 10):
-            print("Invalid split file: splits count must be between 2 and 10")
-            return False
-
-        # Last percent must be 99
-        last_percent = normalized[-1]['percent']
-        if last_percent != 99:
-            print("Invalid split file: last split must be 99")
-            return False
+        
+        split_progress = data.get('split_progress')
+        if not isinstance(split_progress, list):
+            print("File does not contain split_progress")
+            return True
 
         split_times = data.get('split_times')
-        if not isinstance(split_times, dict):
-            print("Invalid split file: split_times must be a dict")
-            return False
-
-        # Quick check that split_times contains keys 0..100
-        for i in range(101):
-            if str(i) not in split_times:
-                print(f"Invalid split file: Missing split_times for {i}%")
-                return False
+        if not isinstance(split_times, list):
+            print("File does not contain split_times")
+            return True
 
         return True
-
-    def load_split_data(self, filepath: str) -> bool:
-        """
-        Load a split file from JSON. On success, sets `ghost_data`, `split_times`, `splits` and flags.
-        Returns True on success, False otherwise.
-        """
-        try:
-            with open(filepath, 'r') as f:
-                data = json.load(f)
-
-            if not self._validate_split_file(data):
-                return False
-
-            # Load base times as ghost_data for compatibility
-            self.ghost_data = data['times']
-            self.split_times = data['split_times'].copy()
-            self.splits = self._normalize_splits(data['splits'])
-            self.ghost_filename = os.path.splitext(os.path.basename(filepath))[0]
-            self.split_filepath = filepath
-            self.is_split_loaded = True
-            return True
-        except Exception as e:
-            print(f"Error loading split file: {e}")
-            return False
 
     def is_split_file_loaded(self) -> bool:
         """Return True if a split file is currently loaded."""
@@ -288,135 +313,7 @@ class RaceDataManager:
 
     def get_splits(self) -> Optional[list]:
         """Return normalized splits list or None."""
-        return self.splits
-
-    def save_split_data(self, filepath: Optional[str] = None) -> bool:
-        """
-        Save the current split ghost back to JSON. If filepath is None, uses the
-        last-loaded split filepath. Returns True on success.
-        """
-        try:
-            target = filepath if filepath else self.split_filepath
-            if not target:
-                print("No target filepath provided to save split data")
-                return False
-
-            data = {
-                "fingerprint": "ALU_TOOL",
-                "times": self.ghost_data if self.ghost_data is not None else self.current_race_data.copy(),
-                "splits": self.splits if self.splits is not None else [],
-                "split_times": self.split_times if self.split_times is not None else {}
-            }
-
-            with open(target, 'w') as f:
-                json.dump(data, f, indent=2)
-
-            return True
-        except Exception as e:
-            print(f"Error saving split data: {e}")
-            return False
-
-    def update_split_times_with_current_race(self) -> bool:
-        """
-        Combine the current race into `self.split_times` by replacing any section (between splits)
-        where the current race was faster than the stored section. Integration method:
-        - For a faster section, replace the percentages within that section with the current race's
-          recorded times shifted so the section start time equals the stored split start time.
-        - After replacing the section, shift all subsequent times to preserve a continuous timeline.
-
-        Returns True if any changes were made, False otherwise.
-        """
-        if not self.is_split_loaded or not self.split_times or not self.splits:
-            print("No split file loaded to update")
-            return False
-
-        changed = False
-
-        # Work on integer-based times for calculations
-        split_times_int = {k: int(v) for k, v in self.split_times.items()}
-
-        # Iterate through split sections
-        # Start of first section is 0
-        starts = [0] + [s['percent'] for s in self.splits]
-        # If splits list contains 99 as last, ensure we treat sections appropriately
-        for i in range(len(starts) - 1):
-            S = starts[i]
-            E = starts[i+1]
-
-            # Guard: ensure S < E
-            if S >= E:
-                continue
-
-            # Existing stored section duration
-            ghost_start = split_times_int.get(str(S), None)
-            ghost_end = split_times_int.get(str(E), None)
-            if ghost_start is None or ghost_end is None:
-                continue
-            ghost_dur = ghost_end - ghost_start
-
-            # Current race data for this section
-            try:
-                curr_start = int(self.current_race_data.get(str(S), "0000000"))
-                curr_end = int(self.current_race_data.get(str(E), "0000000"))
-            except Exception:
-                continue
-
-            # If current race doesn't have valid times for both ends, skip
-            if curr_start == 0 or curr_end == 0:
-                # treat "0000000" as missing
-                continue
-
-            curr_dur = curr_end - curr_start
-            if curr_dur < 0:
-                continue
-
-            # If current section is faster than stored ghost section, incorporate it
-            if curr_dur < ghost_dur:
-                # Compute offset so the section's start aligns to stored ghost start
-                offset = ghost_start - curr_start
-
-                # Build new times for p in (S..E]
-                new_section_times = {}
-                for p in range(S + 1, E + 1):
-                    curr_val = self.current_race_data.get(str(p), "0000000")
-                    if curr_val == "0000000":
-                        # If current race missing this percent, try to interpolate linearly within section
-                        # fallback to previous value in new_section_times or to ghost value
-                        if new_section_times:
-                            last_p = max(new_section_times.keys())
-                            new_section_times[p] = new_section_times[last_p]
-                        else:
-                            new_section_times[p] = split_times_int.get(str(p), split_times_int.get(str(S)))
-                    else:
-                        new_section_times[p] = int(curr_val) + offset
-
-                new_section_end = new_section_times.get(E, None)
-                if new_section_end is None:
-                    continue
-
-                # Amount we will reduce later times by
-                time_reduction = ghost_end - new_section_end
-
-                # Apply new section times into split_times_int
-                for p, t in new_section_times.items():
-                    split_times_int[str(p)] = t
-
-                # Shift all subsequent times (percent > E) by subtracting time_reduction
-                if time_reduction != 0:
-                    for p in range(E + 1, 101):
-                        if str(p) in split_times_int:
-                            split_times_int[str(p)] = max(0, split_times_int[str(p)] - time_reduction)
-
-                changed = True
-
-        if changed:
-            # Save back into self.split_times as zero-padded 7-digit strings
-            for k in split_times_int:
-                self.split_times[k] = f"{split_times_int[k]:07d}"
-            print("Split times updated with current race best sections")
-            return True
-
-        return False
+        return self.splits, self.current_splits, self.ghost_splits
     
     def get_ghost_time_at_progress(self, progress: float) -> Optional[str]:
         """
@@ -456,6 +353,14 @@ class RaceDataManager:
         except (ValueError, TypeError):
             return None
     
+    def is_new_split_available(self, override: bool = False) -> bool:
+        """Check if a new split has been reached that hasn't been recorded yet."""
+        if self.new_split_available:
+            self.new_split_available = False
+            return True
+        elif override:
+            return True
+        return False
     def is_ghost_loaded(self) -> bool:
         """Check if a ghost is currently loaded."""
         return self.ghost_time_data is not None and self.ghost_progress_data is not None

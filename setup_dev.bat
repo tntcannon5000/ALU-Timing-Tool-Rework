@@ -13,6 +13,7 @@ echo Detected Python version: %PYTHON_VERSION%
 set VALID_PYTHON=0
 echo %PYTHON_VERSION% | findstr /B "3.12" >nul && set VALID_PYTHON=1
 echo %PYTHON_VERSION% | findstr /B "3.13" >nul && set VALID_PYTHON=1
+echo %PYTHON_VERSION% | findstr /B "3.14" >nul && set VALID_PYTHON=1
 
 if %VALID_PYTHON%==0 (
     echo.

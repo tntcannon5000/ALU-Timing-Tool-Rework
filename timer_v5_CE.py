@@ -109,7 +109,7 @@ class ALUTimingTool:
         print(f"Race mode changed to: {mode}")
 
     def _on_load_split(self, filepath: str):
-        success = self.race_data_manager.load_split_data(filepath)
+        success = self.race_data_manager.load_ghost_data(filepath)
         if success:
             filename = self.race_data_manager.get_ghost_filename()
             self.ui.update_ghost_filename(filename)
@@ -211,7 +211,7 @@ class ALUTimingTool:
     # ~900-1100ms after race completion — we never need to stop it manually.
     # ------------------------------------------------------------------
 
-    RACE_ENDED_THRESHOLD_US = 100000  # µs divergence before we confirm race ended
+    RACE_ENDED_THRESHOLD_US = 250000  # µs divergence before we confirm race ended
 
     @staticmethod
     def _detect_race_state(
@@ -236,7 +236,8 @@ class ALUTimingTool:
         if (race_state_val == 1000000 or race_state_val == 0) and (gear == 1 or gear == 0) and rpm == 1250:
             return "menus"
         elif (
-            timer_raw_us > 0
+            race_state_val != 0         # skip VT-divergence check when VT is disabled (always 0)
+            and timer_raw_us > 0
             and progress_raw > 0.99
             and race_state_val % 33333 != 0
             and (race_state_val - timer_raw_us) > ALUTimingTool.RACE_ENDED_THRESHOLD_US
@@ -487,6 +488,7 @@ class ALUTimingTool:
                 self.race_in_progress = True
                 self.ui.update_delta("=0.000")
                 self.ui.update_background_color("race",0)
+                self.ui.update_splits(timer_raw_us, progress_raw)
                 print("Race active — recording")
 
             # Transition to "ended" — game says race finished.
@@ -594,6 +596,7 @@ class ALUTimingTool:
             now = systime.time()
             if now - self.last_ui_update >= self.ui_update_interval:
                 self.ui.update_timer(self.current_timer_display)
+                if self.race_data_manager.is_new_split_available(): self.ui.update_splits(timer_raw_us, progress_raw)
                 self.ui.update_percentage(self.percentage)
                 self.last_ui_update = now
 

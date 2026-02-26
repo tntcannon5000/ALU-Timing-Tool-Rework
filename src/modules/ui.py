@@ -66,6 +66,7 @@ class TimingToolUI:
         self.split_view_visible = False
         self.toggle_split_view_button = None
         self.configure_splits_button = None
+        self.rows = []
 
         # Data to display
         self.current_timer_display = "00:00.000"
@@ -75,6 +76,8 @@ class TimingToolUI:
         self.avg_inference_time = 0
         self.current_inference_time = 0
         self.delta_time = "Rec..."  # Default delta text (CE v5: shows Rec... in record mode)
+        self.current_timer_us = 0
+        self.progress = 0.0
 
         # Delta display font base size (adjust this to change the main display text size)
         self.DELTA_FONT_BASE = 65
@@ -197,25 +200,15 @@ class TimingToolUI:
 
         if mode == "record":
             self.load_ghost_button.config(state="disabled", bg="#7f8c8d", text="Load Race Ghost", command=self.load_ghost_file)
-            if self.configure_splits_button:
-                self.configure_splits_button.config(state="disabled", bg="#7f8c8d")
-            if self.toggle_split_view_button:
+        else:
+            self.load_ghost_button.config(state="normal", bg="#3498db", text="Load Race Ghost", command=self.load_split_file)
+        if self.configure_splits_button:
+            self.configure_splits_button.config(state="normal", bg="#8e44ad")
+        if self.toggle_split_view_button:
+            if self.race_data_manager and getattr(self.race_data_manager, 'splits', None):
+                self.toggle_split_view_button.config(state="normal", bg="#8e44ad")
+            else:
                 self.toggle_split_view_button.config(state="disabled", bg="#7f8c8d")
-        elif mode == "race":
-            self.load_ghost_button.config(state="normal", bg="#3498db", text="Load Race Ghost", command=self.load_ghost_file)
-            if self.configure_splits_button:
-                self.configure_splits_button.config(state="disabled", bg="#7f8c8d")
-            if self.toggle_split_view_button:
-                self.toggle_split_view_button.config(state="disabled", bg="#7f8c8d")
-        elif mode == "splits":
-            self.load_ghost_button.config(state="normal", bg="#3498db", text="Load Split Ghost", command=self.load_split_file)
-            if self.configure_splits_button:
-                self.configure_splits_button.config(state="normal", bg="#8e44ad")
-            if self.toggle_split_view_button:
-                if self.race_data_manager and getattr(self.race_data_manager, 'splits', None):
-                    self.toggle_split_view_button.config(state="normal", bg="#8e44ad")
-                else:
-                    self.toggle_split_view_button.config(state="disabled", bg="#7f8c8d")
 
         if self.on_mode_change:
             self.on_mode_change(mode)
@@ -322,7 +315,7 @@ class TimingToolUI:
         """Open a dialog allowing the user to configure split names and percentages."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Configure Splits")
-        dialog.geometry("480x420")
+        dialog.geometry("400x450")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.configure(bg="#34495e")
@@ -354,15 +347,15 @@ class TimingToolUI:
                 frame = tk.Frame(rows_frame, bg="#34495e")
                 frame.pack(fill="x", pady=2)
                 tk.Label(frame, text=f"Split {i+1} name:", bg="#34495e", fg="white").pack(side="left")
-                name_var = tk.StringVar(value=(existing[i]['name'] if i < len(existing) else f"split_{i+1}"))
+                name_var = tk.StringVar(value=(existing[i][0] if i < len(existing) else f"split_{i+1}"))
                 name_entry = tk.Entry(frame, textvariable=name_var, width=18)
                 name_entry.pack(side="left", padx=6)
                 tk.Label(frame, text="Percent:", bg="#34495e", fg="white").pack(side="left")
                 if i == n - 1:
-                    percent_var = tk.IntVar(value=99)
+                    percent_var = tk.IntVar(value=100)
                     tk.Label(frame, text="End", bg="#34495e", fg="#ecf0f1", width=5).pack(side="left", padx=6)
                 else:
-                    default_percent = (existing[i]['percent'] if i < len(existing) else int(((i+1)/n)*99))
+                    default_percent = (existing[i][1] if i < len(existing) else int(((i+1)/n)*100))
                     percent_var = tk.IntVar(value=default_percent)
                     tk.Spinbox(frame, from_=1, to=98, textvariable=percent_var, width=5).pack(side="left", padx=6)
                 entry_widgets.append((name_var, percent_var))
@@ -388,7 +381,7 @@ class TimingToolUI:
             try:
                 for name_var, percent_var in entry_widgets:
                     name = name_var.get().strip()
-                    percent = int(percent_var.get())
+                    percent = percent_var.get() / 100.0
                     splits_list.append([name, percent])
             except Exception:
                 messagebox.showerror("Error", "Invalid split values")
@@ -397,27 +390,20 @@ class TimingToolUI:
             if not (2 <= len(splits_list) <= 10):
                 messagebox.showerror("Error", "Splits count must be between 2 and 10")
                 return
-            if splits_list[-1][1] != 99:
-                messagebox.showerror("Error", "Last split percent must be 99")
+            if splits_list[-1][1] != 1.0:
+                messagebox.showerror("Error", "Last split percent must be 100%")
                 return
 
             percents = [p for (_, p) in splits_list]
-            if any(p < 1 or p > 99 for p in percents):
-                messagebox.showerror("Error", "Split percents must be between 1 and 99")
+            if any(p < .01 or p > 1.0 for p in percents):
+                messagebox.showerror("Error", "Split percents must be between 1 and 100%")
                 return
             if any(percents[i] <= percents[i-1] for i in range(1, len(percents))):
                 messagebox.showerror("Error", "Split percents must be strictly increasing")
                 return
 
-            normalized = None
-            if self.race_data_manager and hasattr(self.race_data_manager, '_normalize_splits'):
-                normalized = self.race_data_manager._normalize_splits(splits_list)
-                if normalized is None:
-                    messagebox.showerror("Error", "Failed to normalize splits")
-                    return
-                self.race_data_manager.splits = normalized
-                if self.toggle_split_view_button:
-                    self.toggle_split_view_button.config(state="normal", bg="#8e44ad")
+            if self.toggle_split_view_button:
+                self.toggle_split_view_button.config(state="normal", bg="#8e44ad")
 
             # Back up existing split file before overwriting
             if (self.race_data_manager
@@ -444,7 +430,7 @@ class TimingToolUI:
                         return
 
             if hasattr(self, 'on_configure_splits') and self.on_configure_splits:
-                self.on_configure_splits(normalized if normalized is not None else splits_list)
+                self.on_configure_splits(splits_list)
 
             dialog.destroy()
 
@@ -459,7 +445,7 @@ class TimingToolUI:
             if not self.split_view_frame:
                 self.split_view_frame = tk.Frame(self.root, bg="#222f3e")
             # Pack split view between main display and race panel
-            self.split_view_frame.pack(side="top", fill="x", padx=0, pady=(4, 0))
+            self.split_view_frame.pack(side="top", fill="x", padx=0, pady=(0, 0))
             self.update_split_view()
         else:
             if self.split_view_frame:
@@ -473,7 +459,7 @@ class TimingToolUI:
         try:
             splits = self.race_data_manager.splits
             if splits:
-                return max(60, int(len(splits) * 28 * self.current_scaling))
+                return max(60, int(len(splits) * 33 * self.current_scaling))
         except Exception:
             pass
         return 0
@@ -492,95 +478,115 @@ class TimingToolUI:
             new_height = height - split_h
         self.root.geometry(f"{width}x{max(60, new_height)}+{x}+{y}")
 
-    def _format_time_ms(self, ms_str: str) -> str:
+    def _format_time_ms(self, raw_us: int) -> str:
         try:
-            if not ms_str or ms_str == "0000000":
+            if not raw_us or raw_us == 0:
                 return "--:--.---"
-            ms = int(ms_str)
-            seconds = ms / 1000.0
+            seconds = raw_us / 1000000.0
             m = int(seconds // 60)
             s = seconds - (m * 60)
             return f"{m}:{s:06.3f}"
         except Exception:
             return "--:--.---"
 
-    def _format_delta_ms(self, delta_ms: int) -> str:
+    def _format_delta_ms(self, delta_us: int) -> str:
         try:
-            if delta_ms is None:
-                return ""
-            sign = '-' if delta_ms < 0 else '+'
-            s = abs(delta_ms) / 1000.0
-            return f"{sign}{s:0.2f}"
+            if delta_us is None:
+                return "--.---"
+            sign = '-' if delta_us <= 0 else '+'
+            s = abs(delta_us) / 1000000.0
+            return f"{sign}{s:0.3f}"
         except Exception:
-            return ""
+            return "--.---"
 
     def update_split_view(self):
         """Rebuild the split comparison view from current split data."""
         if not self.split_view_frame:
             self.split_view_frame = tk.Frame(self.root, bg="#222f3e")
 
-        for w in self.split_view_frame.winfo_children():
-            w.destroy()
 
-        splits = None
+        splits, current, ghost = None, None, None
         if self.race_data_manager and hasattr(self.race_data_manager, 'get_splits'):
-            splits = self.race_data_manager.get_splits()
+            splits, current, ghost = self.race_data_manager.get_splits()
+
+        has_ghost = ghost is not None
+        has_live = current is not None and len(current) > 0
+        is_init = current is None or len(current) == 0 or len(current) == len(splits)
+
+        if is_init: 
+            for w in self.split_view_frame.winfo_children(): 
+                try: w.destroy()
+                except Exception: pass
+            self.rows = []
 
         if not splits:
             tk.Label(self.split_view_frame, text="No splits configured", bg="#222f3e", fg="white").pack(padx=8, pady=4)
             return
+        #try:
+        #    for v in (self.race_data_manager.current_race_data.values()
+        #              if hasattr(self.race_data_manager, 'current_race_data') else []):
+        #        if v != "0000000":
+        #            has_live = True
+        #            break
+        #except Exception:
+        #    has_live = False
 
-        has_live = False
-        try:
-            for v in (self.race_data_manager.current_race_data.values()
-                      if hasattr(self.race_data_manager, 'current_race_data') else []):
-                if v != "0000000":
-                    has_live = True
-                    break
-        except Exception:
-            has_live = False
-
-        font_size = max(8, int(10 * self.current_scaling))
-
+        #font_size = max(10, int(12 * self.current_scaling))
+        font_size = 21
+        index = 0
         for s_item in splits:
-            name = s_item.get('name', 'split')
-            percent = s_item.get('percent', 0)
+            if is_init or index == len(current) - 1:
+                name = s_item[0]
+                percent = f"{int(s_item[1]*100)}%"
 
-            ghost_time = None
-            if getattr(self.race_data_manager, 'split_times', None):
-                ghost_time = self.race_data_manager.split_times.get(str(percent), "0000000")
 
-            row = tk.Frame(self.split_view_frame, bg="#222f3e")
-            row.pack(fill='x', padx=8, pady=2)
+                if is_init: 
+                    self.rows.append(None) # placeholder to preserve indexing for later updates
+                    self.rows[index] = tk.Frame(self.split_view_frame, bg="#222f3e")
+                    self.rows[index].pack(fill='x', padx=6, pady=0)
+                
+                current_time = current[index] - current[index-1] if 0 < index < len(current) else None
 
-            if not has_live:
-                tk.Label(row, text=name, bg="#222f3e", fg="white", anchor='w',
-                         width=10, font=("Helvetica", font_size)).grid(row=0, column=0, sticky='w')
-                tk.Label(row, text="=0.00", bg="#222f3e", fg="#bdc3c7",
-                         width=5, anchor='e', font=("Helvetica", font_size)).grid(row=0, column=1, sticky='e')
-                tk.Label(row, text="=0.00", bg="#222f3e", fg="#bdc3c7",
-                         width=5, anchor='e', font=("Helvetica", font_size)).grid(row=0, column=2, sticky='e')
-                tk.Label(row, text="0.00", bg="#222f3e", fg="#bdc3c7",
-                         width=4, anchor='e', font=("Helvetica", font_size)).grid(row=0, column=3, sticky='e')
-            else:
-                current_time = (self.race_data_manager.current_race_data.get(str(percent), "0000000")
-                                if hasattr(self.race_data_manager, 'current_race_data') else "0000000")
-                delta_display = ""
-                try:
-                    if current_time and ghost_time and current_time != "0000000" and ghost_time != "0000000":
-                        delta_ms = int(current_time) - int(ghost_time)
-                        delta_display = self._format_delta_ms(delta_ms)
-                except Exception:
+                if not has_live and not has_ghost:
+                    tk.Label(self.rows[index], text=name, bg="#222f3e", fg="white", anchor='w',
+                            width=11, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                    tk.Label(self.rows[index], text="", bg="#222f3e", fg="#bdc3c7",
+                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text="0:00.000", bg="#222f3e", fg="#bdc3c7",
+                            width=8, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text="0:00.000", bg="#222f3e", fg="#bdc3c7",
+                            width=8, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+                elif not has_ghost:
+                    tk.Label(self.rows[index], text=name, bg="#222f3e", fg="white", anchor='w',
+                            width=11, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                    tk.Label(self.rows[index], text="=0.000", bg="#222f3e", fg="#bdc3c7",
+                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg="#222f3e", fg="#bdc3c7",
+                            width=8, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text="−:−−.−−−", bg="#222f3e", fg="#bdc3c7",
+                            width=8, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+                else:
+                    ghost_time = ghost[index]
                     delta_display = ""
+                    if current_time is None and index == 0:
+                        current_time = current[0] if current and len(current) > 0 else None
+                    try:
+                        if current_time and ghost_time and current_time != 0 and ghost_time != 0:
+                            delta_us = current_time - ghost_time
+                            delta_display = self._format_delta_ms(delta_us)
+                    except Exception:
+                        delta_display = ""
 
-                tk.Label(row, text=name, bg="#222f3e", fg="white", anchor='w',
-                         width=20, font=("Helvetica", font_size)).pack(side='left')
-                delta_fg = "#2ecc71" if delta_display and delta_display.startswith('-') else "#e74c3c"
-                tk.Label(row, text=delta_display, bg="#222f3e", fg=delta_fg,
-                         width=8, font=("Helvetica", font_size)).pack(side='left')
-                tk.Label(row, text=self._format_time_ms(ghost_time), bg="#222f3e", fg="#bdc3c7",
-                         anchor='e', width=12, font=("Helvetica", font_size)).pack(side='right')
-
+                    tk.Label(self.rows[index], text=name, bg="#222f3e", fg="white", anchor='w',
+                            width=11, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                    delta_fg = "#2ecc71" if delta_display and delta_display.startswith('-') else "#e74c3c"
+                    tk.Label(self.rows[index], text=delta_display, bg="#222f3e", fg=delta_fg,
+                            width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg="#222f3e", fg="#bdc3c7",
+                            anchor='e', width=8, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text=self._format_time_ms(ghost_time), bg="#222f3e", fg="#bdc3c7",
+                            anchor='e', width=8, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+            index += 1
     # ──────────────────────────────────────────────────────────────────────
     #  Background color (race mode delta coloring)
     # ──────────────────────────────────────────────────────────────────────
@@ -791,7 +797,7 @@ class TimingToolUI:
 
         # Pin state
         self.is_pinned = self.ui_config.get("is_pinned", True)
-        self.root.wm_attributes("-topmost", self.is_pinned)
+        self.root.wm_attributes("-topmost", True)
 
         # ── Main container (fixed height — does not grow with panels) ──
         main_container = tk.Frame(self.root, bg="#2c3e50", height=base_h)
@@ -897,7 +903,7 @@ class TimingToolUI:
         self.taskbar_window.iconify()
 
         self.root.configure(bg="#2c3e50")
-        self.root.wm_attributes("-topmost", self.is_pinned)
+        self.root.wm_attributes("-topmost", True)
 
         # Main container (fixed height — does not grow with panels)
         main_container = tk.Frame(self.root, bg="#2c3e50", height=base_height)
@@ -1010,8 +1016,8 @@ class TimingToolUI:
         self.mode_var = tk.StringVar(value="record")
         self.mode_combobox = ttk.Combobox(
             mode_frame, textvariable=self.mode_var,
-        #    values=["record", "race", "splits"],
-            values=["record", "race"],
+            values=["record", "race", "splits"],
+        #    values=["record", "race"],
             state="readonly", width=18,
         )
         self.mode_combobox.pack(anchor="w", pady=(2, 0))
@@ -1048,8 +1054,8 @@ class TimingToolUI:
         # Configure splits button (disabled unless splits mode)
         self.configure_splits_button = tk.Button(
             right_column, text="Configure Splits", command=self.open_configure_splits_dialog,
-            bg="#7f8c8d", fg="white", font=("Helvetica", 9),
-            relief="flat", width=18, state="disabled",
+            bg="#8e44ad", fg="white", font=("Helvetica", 9),
+            relief="flat", width=18, state="normal",
         )
         self.configure_splits_button.pack(pady=(0, 5))
 
@@ -1219,6 +1225,11 @@ class TimingToolUI:
 
     def update_percentage(self, percentage: str):
         self.percentage = percentage
+    
+    def update_splits(self, timer_us: int, progress: float):
+        self.current_timer_us = timer_us
+        self.progress = progress
+        self.update_split_view()
 
     def update_loop_time(self, elapsed_ms: float, avg_loop_time: float):
         self.elapsed_ms = elapsed_ms
