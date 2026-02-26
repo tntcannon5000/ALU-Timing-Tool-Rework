@@ -1,0 +1,1069 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ALU Timing Tool — Cheat Table v2.6
+  ===================================
+  This is a READ-ONLY timing/telemetry overlay for Asphalt 9: Legends (Steam).
+  It does NOT modify any game values, inject code, or alter gameplay in any way.
+
+  Purpose:
+    - Reads race timer, progress, RPM, gear, checkpoint, and visual timer
+      values from game memory for display in an external timing tool.
+    - Writes those values to a local temp file so a companion Python app
+      can display split times, ghost comparisons, and race analytics.
+
+  How it works (v2.6 — Zero-Write, Module Data-Section Scan):
+    1. The game module's PE header is parsed (pure read) to locate every
+       writable, non-executable data section (.data, .bss, etc.).
+    2. Each data section is read in 256 KB chunks with readBytes() — a single
+       bulk read per chunk, never touching any game code.
+    3. Every 8-byte-aligned slot in the chunk is interpreted as a 64-bit
+       pointer.  If the value points into heap space (below module base,
+       above 0x10000) it is collected as a candidate global address.
+    4. Each candidate is immediately tested with tight field-range validators
+       (RPM float, gear int, timer µs, progress float, checkpoint int).
+       Passing candidates are stored as locked chains right away.
+    5. Timer chain requires two consecutive 500ms discovery ticks with an
+       advancing delta (400k–600k µs/tick), so candidate timer globals are
+       seeded on the first tick and locked on the second.
+    6. Once all three chains are locked a 1ms poll timer reads the live
+       struct bases via readPointer() and writes the bridge file.
+
+  v2.6 changes vs v2.5:
+    - Replaced the 128 KB backward code-byte scan (which found RIP-relative
+      MOV instructions near known hook sites, yielding zero chain matches)
+      with a whole-module writable-data-section scan.
+    - All discovered chains are level=1 (data-section global → heap struct),
+      so no L2 singleton traversal is needed.
+    - AOBScan is retained ONLY for an optional sanity-log line confirming
+      the game version's field offsets are still correct; it is never used
+      for address discovery.
+    - Everything else — bridge file format, display entry IDs, offsets,
+      validation logic — is identical to v2.5.
+
+  This table is part of the open-source ALU Timing Tool project.
+  No game values are modified.  No competitive advantage is gained.
+  This is purely a telemetry reader for personal race analysis.
+-->
+<CheatTable CheatEngineTableVersion="46">
+  <CheatEntries>
+    <!--
+      Display entries — addresses are set dynamically by the Lua bridge below.
+      They show live values in the CE table without any code injection.
+    -->
+    <CheatEntry>
+      <ID>1</ID>
+      <Description>"RPM (float)"</Description>
+      <ShowAsSigned>0</ShowAsSigned>
+      <VariableType>Float</VariableType>
+      <Address>0</Address>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>2</ID>
+      <Description>"RPM (int)"</Description>
+      <ShowAsSigned>0</ShowAsSigned>
+      <VariableType>4 Bytes</VariableType>
+      <Address>0</Address>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>3</ID>
+      <Description>"Gear"</Description>
+      <ShowAsSigned>0</ShowAsSigned>
+      <VariableType>4 Bytes</VariableType>
+      <Address>0</Address>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>7</ID>
+      <Description>"Race Time (µs)"</Description>
+      <ShowAsSigned>0</ShowAsSigned>
+      <VariableType>4 Bytes</VariableType>
+      <Address>0</Address>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>8</ID>
+      <Description>"Race Progress (0-1)"</Description>
+      <ShowAsSigned>0</ShowAsSigned>
+      <VariableType>Float</VariableType>
+      <Address>0</Address>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>5</ID>
+      <Description>"Checkpoint"</Description>
+      <ShowAsSigned>0</ShowAsSigned>
+      <VariableType>4 Bytes</VariableType>
+      <Address>0</Address>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>11</ID>
+      <Description>"Visual Timer"</Description>
+      <ShowAsSigned>0</ShowAsSigned>
+      <VariableType>4 Bytes</VariableType>
+      <Address>0</Address>
+    </CheatEntry>
+    <!--
+      ============================================================
+      ALU File Bridge — Lua-only, zero-write telemetry export
+      ============================================================
+      Discovers struct pointers by scanning the module data section.
+      Writes telemetry to %TEMP%\alu_ce_bridge.dat for the Python app.
+    -->
+    <CheatEntry>
+      <ID>9000</ID>
+      <Description>"ALU File Bridge (Lua-only, zero-write)"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+{$lua}
+if syntaxcheck then return end
+
+-- ================================================================
+-- ALU File Bridge v2.6 — Zero-Write, Module Data-Section Scan
+-- ================================================================
+-- Discovery replaces the v2.5 backward-code-scan approach.
+-- Instead of scanning 128 KB before known instruction addresses for
+-- RIP-relative MOV patterns (which produced zero matches because
+-- the game structs are heap objects unreachable from any static
+-- global within 128 KB of the hook sites), v2.6 walks the module's
+-- own writable data sections directly.
+--
+-- Algorithm:
+--   1. Parse PE header → enumerate sections with WRITE flag and no
+--      EXECUTE flag (these are the .data/.bss segments that hold the
+--      engine's global singleton pointers).
+--   2. Read each section in 256 KB chunks (single readBytes per chunk).
+--   3. Treat every 8-byte-aligned slot as a 64-bit pointer candidate.
+--      Accept it iff its value is in heap range:
+--        0x10000 &lt; value &lt; modBase  (below module, above null page)
+--   4. For each heap-range pointer, test the pointed-to address with
+--      tight field validators (RPM float, gear int, timer delta, CP int).
+--      First passing global per struct type → locked chain.
+--   5. Timer chain requires two consecutive 500ms ticks with advancing
+--      delta; all other chains lock immediately if in-menu criteria match.
+--   6. ALU_getBase(chain) = readPointer(chain.global)  (level=1 only).
+-- ================================================================
+
+-- ----------------------------------------------------------------
+-- Configuration
+-- ----------------------------------------------------------------
+local MODULE_NAME      = "Asphalt9_Steam_x64_rtl.exe"
+local SEND_INTERVAL_MS = 1
+local PAD_SIZE         = 128
+local ALU_DATA_PATH    = os.getenv("TEMP") .. "\\alu_ce_bridge.dat"
+local ALU_LOG_PATH     = os.getenv("TEMP") .. "\\alu_ce_log.txt"
+
+-- ----------------------------------------------------------------
+-- Field offsets (unchanged from v2.4/v2.5)
+-- ----------------------------------------------------------------
+local OFF_RPM_FLOAT = 0x1B8
+local OFF_GEAR      = 0x0A0
+local OFF_TIMER     = 0x010
+local OFF_PROGRESS  = 0x1D8
+local OFF_CHKPOINT  = 0x24C
+
+-- ----------------------------------------------------------------
+-- Global state
+-- ----------------------------------------------------------------
+ALU_pollTimer2     = nil
+ALU_statusForm2    = nil
+ALU_statusLbl2     = nil
+ALU_addrLbl2       = nil
+ALU_baseLbl2       = nil
+ALU_writeCount2    = 0
+ALU_fileReady2     = false
+ALU_modBase2       = 0
+ALU_modSize2       = 0
+
+-- Confirmed pointer chains.  nil = not yet discovered.
+-- { global=&lt;data-section addr&gt;, level=1, off=0 }
+--   ALU_getBase(chain) = readPointer(chain.global)
+ALU_rdiChain   = nil   -- car physics struct: RPM at +1B8, gear at +A0
+ALU_timerChain = nil   -- race session struct: timer at +10, progress at +1D8
+ALU_r13Chain   = nil   -- checkpoint struct:  cp at +24C
+
+-- rdi-candidate globals collected during data-section scan.
+-- Stale structs from previous races pass the field check but are byte-frozen.
+-- The live struct is identified in discovery by RPM delta between 500ms ticks.
+ALU_rdiCandidates = {}
+ALU_prevRpmVals   = {}   -- keyed by global addr → last RPM read via readPointer(global)
+
+-- Timer-candidate globals collected during data-section scan.
+-- Each entry is an address in the module data section.
+-- Delta check locks the chain once timer advances 400k-600k µs per tick.
+ALU_timerCandidates = {}
+ALU_prevTimerVals   = {}   -- keyed by candidate address, not struct address
+
+-- Discovery timer handle (500 ms, self-cancels when all chains found).
+ALU_discoverTimer2 = nil
+
+-- Set to true once the one-shot race-time timer rescan has fired.
+-- Prevents repeated rescans if the timer struct isn't found immediately.
+ALU_timerRescanDone = false
+
+-- ----------------------------------------------------------------
+-- Diagnostic log
+-- ----------------------------------------------------------------
+local function ALU_log(msg)
+    local f = io.open(ALU_LOG_PATH, "a")
+    if f then
+        f:write(os.date("[%H:%M:%S] ") .. tostring(msg) .. "\n")
+        f:flush()
+        f:close()
+    end
+end
+
+do
+    local f = io.open(ALU_LOG_PATH, "w")
+    if f then f:write("=== ALU Bridge v2.6 log ===\n") f:close() end
+end
+
+-- ----------------------------------------------------------------
+-- PE helper: read unsigned 32-bit LE from an absolute address
+-- ----------------------------------------------------------------
+local function readU32(addr)
+    local b = readBytes(addr, 4, true)
+    if not b then return 0 end
+    return b[1] + b[2]*256 + b[3]*65536 + b[4]*16777216
+end
+
+local function readU16(addr)
+    local b = readBytes(addr, 2, true)
+    if not b then return 0 end
+    return b[1] + b[2]*256
+end
+
+-- ----------------------------------------------------------------
+-- Parse the module PE header and return a list of writable,
+-- non-executable section descriptors: { base, size }
+--
+-- Section characteristics flags (PE spec):
+--   0x20000000 = IMAGE_SCN_MEM_EXECUTE
+--   0x40000000 = IMAGE_SCN_MEM_READ
+--   0x80000000 = IMAGE_SCN_MEM_WRITE
+-- We want WRITE=1, EXECUTE=0.
+-- ----------------------------------------------------------------
+local function ALU_parseWritableSections(modBase)
+    -- MZ signature
+    local mz = readU16(modBase)
+    if mz ~= 0x5A4D then
+        ALU_log(string.format("parseSections: bad MZ sig %04X at %X", mz, modBase))
+        return {}
+    end
+
+    local peOff      = readU32(modBase + 0x3C)
+    local peSig      = readU32(modBase + peOff)
+    if peSig ~= 0x00004550 then   -- "PE\0\0" little-endian = 0x00004550
+        ALU_log(string.format("parseSections: bad PE sig %08X", peSig))
+        return {}
+    end
+
+    local numSecs    = readU16(modBase + peOff + 4 + 2)   -- COFF +2
+    local optSize    = readU16(modBase + peOff + 4 + 16)  -- COFF +16
+    local secTableOff = modBase + peOff + 4 + 20 + optSize  -- after COFF(20) + opt header
+
+    -- Also grab SizeOfImage from optional header (PE32+ offset 56 = 0x38)
+    -- optional header starts at peOff + 4 + 20 = peOff + 24
+    local optBase   = modBase + peOff + 24
+    local optMagic  = readU16(optBase)   -- 0x020B = PE32+, 0x010B = PE32
+    local sizeOfImg = 0
+    if optMagic == 0x020B then
+        sizeOfImg = readU32(optBase + 0x38)
+    elseif optMagic == 0x010B then
+        sizeOfImg = readU32(optBase + 0x38)  -- same offset in PE32
+    end
+    ALU_modSize2 = sizeOfImg
+
+    ALU_log(string.format("PE: peOff=%X numSecs=%d optSize=%d optMagic=%04X sizeOfImg=%X",
+        peOff, numSecs, optSize, optMagic, sizeOfImg))
+
+    local sections = {}
+    for i = 0, numSecs - 1 do
+        local sOff   = secTableOff + i * 40
+        local vAddr  = readU32(sOff + 12)   -- VirtualAddress
+        local vSize  = readU32(sOff + 8)    -- VirtualSize (actual bytes used)
+        local rawSize= readU32(sOff + 16)   -- SizeOfRawData
+        local chars  = readU32(sOff + 36)   -- Characteristics
+
+        -- Section name (8 bytes, null-padded)
+        local nb = readBytes(sOff, 8, true)
+        local name = ""
+        if nb then
+            for _, c in ipairs(nb) do
+                if c == 0 then break end
+                name = name .. string.char(c)
+            end
+        end
+
+        -- Robust bit extraction using modular arithmetic (avoids Lua bitwise op version issues)
+        local c26 = math.floor(chars / 0x20000000) % 2   -- bit 29 = EXECUTE
+        local c27 = math.floor(chars / 0x40000000) % 2   -- bit 30 = READ
+        local c28 = math.floor(chars / 0x80000000) % 2   -- bit 31 = WRITE (may be 0 if chars &gt; 2^31 wraps)
+        -- Use readBytes-derived value which is always unsigned
+        local writable   = (c28 == 1)
+        local executable = (c26 == 1)
+
+        local secSz = (vSize &gt; 0 and vSize or rawSize)
+
+        ALU_log(string.format("  section[%d] '%s' VA=%X size=%X chars=%X w=%d x=%d",
+            i, name, vAddr, secSz, chars, writable and 1 or 0, executable and 1 or 0))
+
+        if writable and not executable and secSz &gt; 0 then
+            sections[#sections+1] = {
+                base = modBase + vAddr,
+                size = secSz,
+                name = name,
+            }
+            ALU_log(string.format("    -> SELECTED as data section (abs=%X sz=%X)",
+                modBase + vAddr, secSz))
+        end
+    end
+
+    ALU_log(string.format("parseSections: %d writable non-exec sections found", #sections))
+    return sections
+end
+
+-- ----------------------------------------------------------------
+-- Extract a 64-bit little-endian pointer from a (1-indexed) byte
+-- table at position i.  Lua numbers are 64-bit doubles; values up
+-- to 2^53 are exact, which covers all user-space addresses.
+-- ----------------------------------------------------------------
+local function extractPtr64(bytes, i)
+    local lo = bytes[i]   + bytes[i+1]*256   + bytes[i+2]*65536
+             + bytes[i+3]*16777216
+    local hi = bytes[i+4] + bytes[i+5]*256   + bytes[i+6]*65536
+             + bytes[i+7]*16777216
+    return lo + hi * 4294967296
+end
+
+-- ----------------------------------------------------------------
+-- Validators (logic identical to v2.5; only the discovery pipeline
+-- that feeds them has changed)
+-- ----------------------------------------------------------------
+
+-- Car physics struct candidate collector.
+-- Loose filter: gear 1-6 AND rpm 1250-9000.
+-- At menu time this collects the ~9 STALE structs from previous races
+-- (frozen at mid-race gear/rpm values). The live struct (gear=1, rpm=1250)
+-- does NOT have a stable .data pointer at menu time — only once a race
+-- starts does its pointer appear (or an existing global get updated to it).
+-- Lock is done exclusively via RPM delta in ALU_runDiscovery.
+local function ALU_isRdiCandidate(b)
+    if not b or b == 0 or b &lt; 0x10000 then return false end
+    if ALU_modSize2 &gt; 0
+       and b &gt;= ALU_modBase2 and b &lt; ALU_modBase2 + ALU_modSize2 then
+        return false
+    end
+    local g   = readInteger(b + OFF_GEAR)
+    local rpm = readFloat(b   + OFF_RPM_FLOAT)
+    if not g or not rpm then return false end
+    if g &gt;= 1 and g &lt;= 6 and rpm &gt;= 1250 and rpm &lt;= 9000 then
+        return true
+    end
+    return false
+end
+
+-- Race session struct: timer int at +10 advances ~500k µs / 500ms tick.
+-- Used both for initial plausibility seed and for delta-lock validation.
+-- Returns "plausible" (not locked) on first call; delta result on subsequent calls.
+local function ALU_isValidTimerBase(b)
+    if not b or b == 0 or b &lt; 0x10000 then return false end
+    if ALU_modSize2 &gt; 0
+       and b &gt;= ALU_modBase2 and b &lt; ALU_modBase2 + ALU_modSize2 then
+        return false
+    end
+    local t = readInteger(b + OFF_TIMER)
+    if not t then return false end
+    local prev = ALU_prevTimerVals[b]
+    ALU_prevTimerVals[b] = t
+    if not prev then return false end
+    local delta = t - prev
+    if delta &gt;= 400000 and delta &lt;= 600000 then
+        ALU_log(string.format("    PASS(timer) b=%X delta=%d", b, delta))
+        return true
+    end
+    return false
+end
+
+-- Plausibility pre-filter for timer candidates collected during section scan.
+-- The table is ALWAYS opened from the main menu, so we require the EXACT
+-- menu-state value for every field.  Any deviation = wrong struct.
+-- Known exact menu values:
+--   OFF_TIMER    (+0x010): t == 1000000  (integer µs, frozen at menu)
+--   OFF_PROGRESS (+0x1D8): p in [0.001, 1.0]  (non-zero in this struct at menu)
+--   OFF_0F8: valid heap pointer (structural signature from v2.4 hook site
+--     'mov rdx,[rdi+F8]' adjacent to the timer write at [rdi+10]).
+--
+-- Race-time identity rules (used post-lock to validate mode):
+--   Singleplayer : visual_timer == race_timer exactly every frame
+--   Multiplayer  : visual_timer always divisible by 33333 µs (~30fps quant);
+--                  race_timer is a continuous accumulator, NEVER divisible by 33333.
+-- The delta-lock in ALU_runDiscovery rejects MP visual-timer structs using the
+-- divisibility rule, ensuring only the continuous race timer gets locked.
+local function ALU_isPlausibleTimerStruct(b)
+    if not b or b == 0 or b &lt; 0x10000 then return false end
+    if ALU_modSize2 &gt; 0
+       and b &gt;= ALU_modBase2 and b &lt; ALU_modBase2 + ALU_modSize2 then
+        return false
+    end
+    -- Structural signature: +0xF8 must be a heap pointer
+    local p2 = readPointer(b + 0x0F8)
+    if not p2 or p2 &lt;= 0x10000 then return false end
+    if ALU_modSize2 &gt; 0
+       and p2 &gt;= ALU_modBase2 and p2 &lt; ALU_modBase2 + ALU_modSize2 then
+        return false
+    end
+    -- Timer and progress field checks
+    local t = readInteger(b + OFF_TIMER)
+    local p = readFloat(b   + OFF_PROGRESS)
+    if not t or not p then return false end
+    if t ~= 1000000 then return false end   -- exact menu value required (always scanning from menu)
+    if p &lt; 0.001 or p &gt; 1.0 then return false end
+    return true
+end
+
+-- Checkpoint struct: cp int at +24C must be &gt;= 0 and &lt; 10000
+local function ALU_isValidR13Base(b)
+    if not b or b == 0 or b &lt; 0x10000 then return false end
+    if ALU_modSize2 &gt; 0
+       and b &gt;= ALU_modBase2 and b &lt; ALU_modBase2 + ALU_modSize2 then
+        return false
+    end
+    local cp = readInteger(b + OFF_CHKPOINT)
+    if not cp or cp &lt; 0 or cp &gt; 9999 then return false end
+    return true
+end
+
+-- ----------------------------------------------------------------
+-- Main data-section scan.
+-- Reads every writable non-exec section in CHUNK_SIZE chunks.
+-- For each 8-byte-aligned slot whose value is in heap range:
+--   • ALU_isRdiCandidate  → adds to ALU_rdiCandidates (delta-locked in discovery)
+--   • ALU_isPlausibleTimerStruct → seeds ALU_timerCandidates for delta-lock
+--   • ALU_isValidR13Base  → locks ALU_r13Chain on first match
+-- rdi is NOT locked here because stale structs from old races satisfy the
+-- field check too and would cause a false lock.  Only the live struct receives
+-- engine writes every frame — RPM changes between 500ms ticks; stale ones don't.
+-- Returns the number of heap-range pointers inspected.
+-- ----------------------------------------------------------------
+local CHUNK_SIZE = 262144   -- 256 KB per readBytes call
+
+local function ALU_scanDataSections(sections)
+    local modBase = ALU_modBase2
+    local modEnd  = modBase + (ALU_modSize2 &gt; 0 and ALU_modSize2 or 0x10000000)
+    local heapMax = modBase   -- any pointer below modBase is treated as heap
+
+    local inspected       = 0
+    local timerSeeds      = 0
+    local r13Found        = false
+
+    for si, sec in ipairs(sections) do
+        ALU_log(string.format("Scanning section %d '%s': base=%X size=%X",
+            si, sec.name, sec.base, sec.size))
+
+        local offset = 0
+        while offset &lt; sec.size do
+            local chunkAddr = sec.base + offset
+            local chunkSz   = math.min(CHUNK_SIZE, sec.size - offset)
+            -- Round down to 8-byte boundary
+            chunkSz = math.floor(chunkSz / 8) * 8
+            if chunkSz == 0 then break end
+
+            local bytes = readBytes(chunkAddr, chunkSz, true)
+            if bytes then
+                -- Iterate every 8-byte-aligned slot in the chunk
+                local limit = chunkSz - 7
+                for i = 1, limit, 8 do
+                    local ptr = extractPtr64(bytes, i)
+                    -- Heap-range check: above null page, below module
+                    if ptr &gt; 0x10000 and ptr &lt; heapMax then
+                        inspected = inspected + 1
+                        local globalAddr = chunkAddr + (i - 1)
+
+                        -- rdi (car physics) — collect candidates for delta-lock in discovery
+                        if not ALU_rdiChain and ALU_isRdiCandidate(ptr) then
+                            ALU_rdiCandidates[#ALU_rdiCandidates+1] = globalAddr
+                            ALU_prevRpmVals[globalAddr] = readFloat(ptr + OFF_RPM_FLOAT) or 0.0
+                        end
+
+                        -- r13 (checkpoint) — lock immediately
+                        if not r13Found and not ALU_r13Chain then
+                            if ALU_isValidR13Base(ptr) then
+                                ALU_r13Chain = {global=globalAddr, level=1, off=0}
+                                r13Found = true
+                                ALU_log(string.format(
+                                    "r13 LOCKED during scan: global=%X struct=%X",
+                                    globalAddr, ptr))
+                            end
+                        end
+
+                        -- Timer seeding removed from initial scan: the timer struct's
+                        -- .data pointer is not stable at menu time (no race running).
+                        -- A one-shot race-time rescan in ALU_runDiscovery seeds candidates
+                        -- once rdi locks (race started) and the timer is actually advancing.
+                    end
+                end
+            else
+                ALU_log(string.format("  readBytes nil at %X+%X — skipping chunk", chunkAddr, chunkSz))
+            end
+
+            offset = offset + CHUNK_SIZE
+        end -- while chunks
+    end -- for sections
+
+    ALU_log(string.format("Scan complete: %d heap ptrs inspected, %d timer seeds",
+        inspected, timerSeeds))
+    ALU_log(string.format("  rdiCandidates=%d  r13:%s  timerCandidates=%d",
+        #ALU_rdiCandidates,
+        ALU_r13Chain and "LOCKED" or "not found",
+        #ALU_timerCandidates))
+
+    return inspected
+end
+
+-- ----------------------------------------------------------------
+-- Fast struct-base lookup (unchanged interface from v2.5)
+-- ----------------------------------------------------------------
+local function ALU_getBase(chain)
+    if not chain then return 0 end
+    return readPointer(chain.global) or 0
+end
+
+-- ----------------------------------------------------------------
+-- 500ms discovery timer body.
+-- Only used post-scan to lock timerChain (requires advancing delta).
+-- All other chains are attempted during the initial scan.
+-- ----------------------------------------------------------------
+function ALU_runDiscovery(sender)
+    if not ALU_timerChain and #ALU_timerCandidates &gt; 0 then
+        for _, globalAddr in ipairs(ALU_timerCandidates) do
+            local ptr = readPointer(globalAddr) or 0
+            if ptr ~= 0 and ptr &gt; 0x10000 and ptr &lt; ALU_modBase2 then
+                -- prevTimerVals is keyed by globalAddr; read current timer via ptr
+                local t      = readInteger(ptr + OFF_TIMER) or 0
+                local prev   = ALU_prevTimerVals[globalAddr]
+                local delta  = prev and (t - prev) or 0
+                ALU_log(string.format("  timerDisc global=%X ptr=%X t=%d prev=%s delta=%d",
+                    globalAddr, ptr, t, tostring(prev), delta))
+                ALU_prevTimerVals[globalAddr] = t
+                if prev and delta &gt;= 400000 and delta &lt;= 600000 then
+                    -- Multiplayer visual timer is always quantised to 33333 µs steps
+                    -- (~30 fps frame boundaries).  Its 500ms delta (~499,995 µs) falls
+                    -- inside our lock window, so we must exclude it explicitly.
+                    -- The RACE timer is a continuous accumulator: t % 33333 ~= 0.
+                    -- In singleplayer visual_timer == race_timer (same value, same struct
+                    -- or separate structs with identical t); neither is quantised, so
+                    -- whichever candidate we hit first is correct.
+                    if t % 33333 == 0 then
+                        ALU_log(string.format(
+                            "  timerDisc SKIP quantised (MP visual timer): global=%X t=%d",
+                            globalAddr, t))
+                    else
+                        ALU_timerChain = {global=globalAddr, level=1, off=0}
+                        ALU_log(string.format(
+                            "timer LOCKED (continuous/SP): global=%X struct=%X delta=%d t=%d",
+                            globalAddr, ptr, delta, t))
+                        break
+                    end
+                end
+            end
+        end
+        if ALU_timerChain and ALU_statusLbl2 then
+            ALU_statusLbl2.Caption = "All chains locked — telemetry active"
+        end
+    end
+
+    -- RPM delta: when a race starts, the live struct receives engine writes and
+    -- its RPM changes between 500ms ticks. Stale structs are frozen → delta=0.
+    if not ALU_rdiChain and #ALU_rdiCandidates &gt; 0 then
+        ALU_discTick = (ALU_discTick or 0) + 1
+        -- Log every 4th tick (~2s) so we can see what each candidate reads
+        local doLog = (ALU_discTick % 4 == 1)
+        if doLog then
+            ALU_log(string.format("rdiDisc tick=%d candidates=%d", ALU_discTick, #ALU_rdiCandidates))
+        end
+        for _, globalAddr in ipairs(ALU_rdiCandidates) do
+            local ptr = readPointer(globalAddr) or 0
+            if ptr ~= 0 and ptr &gt; 0x10000 and ptr &lt; ALU_modBase2 then
+                local rpm  = readFloat(ptr + OFF_RPM_FLOAT) or 0.0
+                local g    = readInteger(ptr + OFF_GEAR) or 0
+                local prev = ALU_prevRpmVals[globalAddr]
+                local dRpm = prev and math.abs(rpm - prev) or 0.0
+                ALU_prevRpmVals[globalAddr] = rpm
+                if doLog then
+                    ALU_log(string.format("  cand global=%X ptr=%X g=%d rpm=%.1f dRpm=%.1f",
+                        globalAddr, ptr, g, rpm, dRpm))
+                end
+                if prev and dRpm &gt; 1.0 then
+                    if g &gt;= 1 and g &lt;= 6 and rpm &gt;= 1250 and rpm &lt;= 9000 then
+                        ALU_rdiChain = {global=globalAddr, level=1, off=0}
+                        ALU_log(string.format(
+                            "rdi LOCKED delta: global=%X struct=%X rpm=%.1f dRpm=%.1f",
+                            globalAddr, ptr, rpm, dRpm))
+                        break
+                    end
+                end
+            else
+                if doLog then
+                    ALU_log(string.format("  cand global=%X ptr=INVALID(%X)", globalAddr, ptr))
+                end
+            end
+        end
+    end
+
+    -- One-shot race-time timer rescan: fires once when rdi locks (race started).
+    -- The timer struct's .data pointer isn't stable at menu time, so we couldn't
+    -- seed candidates during the initial scan. Now that the race is running,
+    -- the struct exists in heap and its timer field is advancing past 1000000.
+    -- Filter: t &gt; 1000000 AND t &lt; 500000000 AND t % 33333 != 0 (not MP visual timer).
+    if ALU_rdiChain and not ALU_timerChain
+       and #ALU_timerCandidates == 0 and not ALU_timerRescanDone then
+        ALU_timerRescanDone = true
+        ALU_log("rdi locked — one-shot race-time timer rescan...")
+        local secs = ALU_parseWritableSections(ALU_modBase2)
+        for _, sec in ipairs(secs) do
+            local offset = 0
+            while offset &lt; sec.size do
+                local chunkAddr = sec.base + offset
+                local chunkSz   = math.min(262144, sec.size - offset)
+                chunkSz = math.floor(chunkSz / 8) * 8
+                if chunkSz == 0 then break end
+                local bytes = readBytes(chunkAddr, chunkSz, true)
+                if bytes then
+                    for i = 1, chunkSz - 7, 8 do
+                        local ptr = extractPtr64(bytes, i)
+                        if ptr &gt; 0x10000 and ptr &lt; ALU_modBase2 then
+                            local t = readInteger(ptr + OFF_TIMER) or -1
+                            local p = readFloat(ptr + OFF_PROGRESS) or -1.0
+                            if t &gt; 1000000 and t &lt; 500000000
+                               and (t % 33333) ~= 0
+                               and p &gt;= 0.001 and p &lt;= 1.0 then
+                                local globalAddr = chunkAddr + (i - 1)
+                                ALU_timerCandidates[#ALU_timerCandidates+1] = globalAddr
+                                ALU_prevTimerVals[globalAddr] = t
+                            end
+                        end
+                    end
+                end
+                offset = offset + 262144
+            end
+        end
+        ALU_log(string.format("timerRescan done: %d candidates seeded", #ALU_timerCandidates))
+    end
+
+    -- Update status label
+    if ALU_baseLbl2 then
+        ALU_baseLbl2.Caption = string.format(
+            "rdi:%s(%d)  timer:%s  r13:%s  tCands=%d",
+            ALU_rdiChain   and "OK" or "--", #ALU_rdiCandidates,
+            ALU_timerChain and "OK" or "--",
+            ALU_r13Chain   and "OK" or "--",
+            #ALU_timerCandidates)
+    end
+
+    -- Stop discovery timer when all three are locked
+    if ALU_rdiChain and ALU_timerChain and ALU_r13Chain then
+        if sender then sender.Enabled = false end
+        ALU_log("Discovery complete — all chains locked, discovery timer stopped")
+        if ALU_statusLbl2 then
+            ALU_statusLbl2.Caption = "All chains locked — telemetry active"
+        end
+    end
+end
+
+-- ----------------------------------------------------------------
+-- Update CE table address display
+-- ----------------------------------------------------------------
+local function ALU_updateDisplay(rdiBase, timerBase, r13Base)
+    local al = getAddressList()
+    local function setAddr(id, a)
+        local mr = al.getMemoryRecordByID(id)
+        if mr and a and a ~= 0 then
+            mr.Address = string.format("%X", a)
+        end
+    end
+    if rdiBase and rdiBase ~= 0 then
+        setAddr(1, rdiBase + OFF_RPM_FLOAT)
+        setAddr(3, rdiBase + OFF_GEAR)
+    end
+    if timerBase and timerBase ~= 0 then
+        setAddr(7, timerBase + OFF_TIMER)
+        setAddr(8, timerBase + OFF_PROGRESS)
+    end
+    if r13Base and r13Base ~= 0 then
+        setAddr(5, r13Base + OFF_CHKPOINT)
+    end
+end
+
+-- ----------------------------------------------------------------
+-- Status window
+-- ----------------------------------------------------------------
+ALU_statusForm2 = createForm(false)
+ALU_statusForm2.Caption     = "ALU File Bridge v2.6 — Zero-Write"
+ALU_statusForm2.Width       = 560
+ALU_statusForm2.Height      = 195
+ALU_statusForm2.Position    = "poScreenCenter"
+ALU_statusForm2.BorderStyle = "bsSingle"
+
+ALU_statusLbl2 = createLabel(ALU_statusForm2)
+ALU_statusLbl2.Caption  = "Starting up — scanning module data sections..."
+ALU_statusLbl2.Left     = 12
+ALU_statusLbl2.Top      = 10
+ALU_statusLbl2.AutoSize = true
+
+local pathLbl2 = createLabel(ALU_statusForm2)
+pathLbl2.Caption  = "File: " .. ALU_DATA_PATH
+pathLbl2.Left     = 12
+pathLbl2.Top      = 30
+pathLbl2.AutoSize = true
+
+ALU_addrLbl2 = createLabel(ALU_statusForm2)
+ALU_addrLbl2.Caption  = "Sections: parsing..."
+ALU_addrLbl2.Left     = 12
+ALU_addrLbl2.Top      = 50
+ALU_addrLbl2.AutoSize = true
+
+ALU_baseLbl2 = createLabel(ALU_statusForm2)
+ALU_baseLbl2.Caption  = "Chains: discovering..."
+ALU_baseLbl2.Left     = 12
+ALU_baseLbl2.Top      = 70
+ALU_baseLbl2.AutoSize = true
+
+local valueLbl2 = createLabel(ALU_statusForm2)
+valueLbl2.Caption  = "Live values: (polling not yet started)"
+valueLbl2.Left     = 12
+valueLbl2.Top      = 90
+valueLbl2.AutoSize = true
+
+local stateLbl2 = createLabel(ALU_statusForm2)
+stateLbl2.Caption = "Bridge file: not yet writing"
+stateLbl2.Left    = 12
+stateLbl2.Top     = 110
+stateLbl2.AutoSize = true
+
+-- ----------------------------------------------------------------
+-- Stop / cleanup
+-- ----------------------------------------------------------------
+function ALU_stop2()
+    if ALU_pollTimer2 then
+        ALU_pollTimer2.Enabled = false
+        ALU_pollTimer2.destroy()
+        ALU_pollTimer2 = nil
+    end
+    if ALU_discoverTimer2 then
+        ALU_discoverTimer2.Enabled = false
+        ALU_discoverTimer2.destroy()
+        ALU_discoverTimer2 = nil
+    end
+    ALU_rdiChain        = nil
+    ALU_timerChain      = nil
+    ALU_r13Chain        = nil
+    ALU_rdiCandidates   = {}
+    ALU_prevRpmVals     = {}
+    ALU_timerCandidates = {}
+    ALU_prevTimerVals   = {}
+    ALU_writeCount2     = 0
+    ALU_modBase2        = 0
+    ALU_modSize2        = 0
+    ALU_timerRescanDone = false
+    ALU_discTick        = 0
+    pcall(os.remove, ALU_DATA_PATH)
+    ALU_fileReady2 = false
+    if ALU_statusForm2 then
+        ALU_statusForm2.destroy()
+        ALU_statusForm2 = nil
+        ALU_statusLbl2  = nil
+        ALU_addrLbl2    = nil
+        ALU_baseLbl2    = nil
+    end
+end
+
+local stopBtn2 = createButton(ALU_statusForm2)
+stopBtn2.Caption = "Stop Bridge"
+stopBtn2.Left    = 12
+stopBtn2.Top     = 148
+stopBtn2.Width   = 100
+stopBtn2.OnClick = ALU_stop2
+
+ALU_statusForm2.OnClose = function()
+    ALU_stop2()
+    return caFree
+end
+
+ALU_statusForm2.Show()
+
+-- ----------------------------------------------------------------
+-- 1ms poll timer body — same format/logic as v2.5
+-- ----------------------------------------------------------------
+local prevRdiBase   = 0
+local prevTimerBase = 0
+local prevR13Base   = 0
+
+function ALU_writeToFile2()
+    local rdiBase   = ALU_getBase(ALU_rdiChain)
+    local timerBase = ALU_getBase(ALU_timerChain)
+    local r13Base   = ALU_getBase(ALU_r13Chain)
+
+    if rdiBase ~= prevRdiBase or timerBase ~= prevTimerBase or r13Base ~= prevR13Base then
+        prevRdiBase   = rdiBase
+        prevTimerBase = timerBase
+        prevR13Base   = r13Base
+        ALU_updateDisplay(rdiBase, timerBase, r13Base)
+    end
+
+    if rdiBase == 0 then
+        if stateLbl2 then
+            stateLbl2.Caption = "Bridge: awaiting rdi lock — start game"
+        end
+        return
+    end
+
+    local rpm    = readFloat(rdiBase   + OFF_RPM_FLOAT) or 0.0
+    local g      = readInteger(rdiBase + OFF_GEAR)      or 0
+    local t      = timerBase ~= 0 and (readInteger(timerBase + OFF_TIMER)    or 0) or 0
+    local p      = timerBase ~= 0 and (readFloat(timerBase   + OFF_PROGRESS) or 0.0) or 0.0
+    local cp     = r13Base   ~= 0 and (readInteger(r13Base   + OFF_CHKPOINT) or 0) or 0
+    local rpmInt = math.floor(rpm)
+    local vt     = (g == 0) and 0 or t
+
+    local data   = string.format("%d|%.6f|%d|%d|%.6f|%d|%d",
+                                 t, p, rpmInt, g, rpm, cp, vt)
+    local padded = data .. string.rep("\0", PAD_SIZE - #data)
+
+    local f
+    if ALU_fileReady2 then
+        f = io.open(ALU_DATA_PATH, "r+b")
+        if f then f:seek("set", 0) end
+    end
+    if not f then
+        f = io.open(ALU_DATA_PATH, "wb")
+        if f then ALU_fileReady2 = true end
+    end
+
+    if f then
+        f:write(padded)
+        f:flush()
+        f:close()
+        ALU_writeCount2 = ALU_writeCount2 + 1
+        if ALU_writeCount2 % 200 == 0 then
+            if stateLbl2 then
+                stateLbl2.Caption = string.format("Bridge: WRITING  (#%d)", ALU_writeCount2)
+            end
+            if valueLbl2 then
+                valueLbl2.Caption = string.format(
+                    "T=%d  P=%.1f%%  RPM=%d  G=%d  CP=%d",
+                    t, p * 100, rpmInt, g, cp)
+            end
+        end
+    end
+end
+
+-- ----------------------------------------------------------------
+-- Deferred startup — section parse + scan run ONCE after 2s settle.
+-- ----------------------------------------------------------------
+local startupTimer = createTimer(nil, false)
+startupTimer.Interval = 2000
+startupTimer.OnTimer  = function(sender)
+    sender.Enabled = false
+    sender.destroy()
+
+    local modBase = tonumber(getAddress(MODULE_NAME)) or 0
+    if modBase == 0 then
+        ALU_log("ERROR: module not found — is Asphalt 9 running?")
+        if ALU_statusLbl2 then ALU_statusLbl2.Caption = "ERROR: module not found" end
+        return
+    end
+    ALU_modBase2 = modBase
+    ALU_log(string.format("Module base: %X", modBase))
+
+    -- Parse PE sections
+    local sections = ALU_parseWritableSections(modBase)
+    if #sections == 0 then
+        ALU_log("ERROR: no writable data sections found — PE parse failed?")
+        if ALU_statusLbl2 then ALU_statusLbl2.Caption = "ERROR: PE parse failed" end
+        return
+    end
+
+    if ALU_addrLbl2 then
+        local names = {}
+        for _, s in ipairs(sections) do
+            names[#names+1] = string.format("%s@%X(%X)", s.name, s.base, s.size)
+        end
+        ALU_addrLbl2.Caption = "Sections: " .. table.concat(names, "  ")
+    end
+
+    if ALU_statusLbl2 then
+        ALU_statusLbl2.Caption = "Scanning data sections — this may take a few seconds..."
+    end
+
+    -- ---- Main scan (synchronous, ~1-5 seconds depending on module size) ----
+    ALU_log("Starting data-section scan...")
+    local t0 = os.clock()
+    local inspected = ALU_scanDataSections(sections)
+    local elapsed   = os.clock() - t0
+
+    ALU_log(string.format("Scan finished: %.2f s, %d heap ptrs tested", elapsed, inspected))
+
+    if ALU_addrLbl2 then
+        ALU_addrLbl2.Caption = string.format(
+            "Scan: %.2f s, %d heap ptrs, %d timer cands",
+            elapsed, inspected, #ALU_timerCandidates)
+    end
+
+    if ALU_baseLbl2 then
+        ALU_baseLbl2.Caption = string.format(
+            "rdi:%s  timer:-- (needs race)  r13:%s",
+            ALU_rdiChain and "OK" or "--",
+            ALU_r13Chain and "OK" or "--")
+    end
+
+    if ALU_rdiChain then
+        if ALU_statusLbl2 then
+            ALU_statusLbl2.Caption = "rdi locked — start race to lock timer chain"
+        end
+    else
+        if ALU_statusLbl2 then
+            ALU_statusLbl2.Caption = "No rdi lock yet — are you in the game main menu?"
+        end
+    end
+
+    -- ---- Start poll timer (bridge outputs zeros until rdi locked) ----
+    ALU_pollTimer2 = createTimer(nil, false)
+    ALU_pollTimer2.Interval = SEND_INTERVAL_MS
+    ALU_pollTimer2.OnTimer  = ALU_writeToFile2
+    ALU_pollTimer2.Enabled  = true
+
+    -- ---- Start discovery timer (handles timer chain + rdi retry) ----
+    ALU_discoverTimer2 = createTimer(nil, false)
+    ALU_discoverTimer2.Interval = 500
+    ALU_discoverTimer2.OnTimer  = ALU_runDiscovery
+    ALU_discoverTimer2.Enabled  = true
+
+    ALU_log("Poll timer and discovery timer started")
+end
+startupTimer.Enabled = true
+
+
+[DISABLE]
+{$lua}
+if syntaxcheck then return end
+
+if ALU_pollTimer2 then
+    ALU_pollTimer2.Enabled = false
+    ALU_pollTimer2.destroy()
+    ALU_pollTimer2 = nil
+end
+if ALU_discoverTimer2 then
+    ALU_discoverTimer2.Enabled = false
+    ALU_discoverTimer2.destroy()
+    ALU_discoverTimer2 = nil
+end
+ALU_rdiChain        = nil
+ALU_timerChain      = nil
+ALU_r13Chain        = nil
+ALU_rdiCandidates   = {}
+ALU_prevRpmVals     = {}
+ALU_timerCandidates = {}
+ALU_prevTimerVals   = {}
+ALU_modBase2        = 0
+ALU_modSize2        = 0
+ALU_writeCount2     = 0
+ALU_timerRescanDone = false
+ALU_discTick        = 0
+pcall(os.remove, os.getenv("TEMP") .. "\\alu_ce_bridge.dat")
+ALU_fileReady2 = false
+if ALU_statusForm2 then
+    ALU_statusForm2.destroy()
+    ALU_statusForm2 = nil
+    ALU_statusLbl2  = nil
+    ALU_addrLbl2    = nil
+    ALU_baseLbl2    = nil
+end
+
+      </AssemblerScript>
+    </CheatEntry>
+  </CheatEntries>
+  <UserdefinedSymbols/>
+  <!--
+    ================================================================
+    Auto-Attach Lua Script
+    ================================================================
+    Finds the Asphalt 9 process, attaches CE in read-only mode,
+    then enables the Lua-only bridge (ID 9000) after a 2-second
+    settling delay.
+
+    v2.6: identical auto-attach logic to v2.5; only bridge internals changed.
+  -->
+  <LuaScript>--[[
+  ================================================================
+  ALU Trainer v2.6 — Auto-attach and Auto-enable (zero-write)
+  ================================================================
+  Finds the Asphalt 9 process, attaches CE in read-only mode,
+  then enables the Lua-only bridge (ID 9000).
+
+  No AA scripts are enabled.  All telemetry reading and address
+  discovery is handled entirely inside the Lua bridge script.
+]]
+
+local SCRIPT_IDS      = {9000}
+local POLL_MS         = 2000
+local ENABLE_DELAY_MS = 2000
+
+ALU_scanTimer = nil
+
+function ALU_findAsphalt()
+    local pid, pname = nil, nil
+    pcall(function()
+        local sl = createStringlist()
+        getProcessList(sl)
+        for i = 0, sl.Count - 1 do
+            local entry = sl[i]
+            if entry and string.find(string.lower(entry), "asphalt") then
+                local h = string.match(entry, "^(%x+)")
+                if h then
+                    pid   = tonumber(h, 16)
+                    pname = string.match(entry, "^%x+%-(.+)$")
+                end
+                break
+            end
+        end
+        sl.destroy()
+    end)
+    return pid, pname
+end
+
+function ALU_enableScripts()
+    local al = getAddressList()
+    for _, id in ipairs(SCRIPT_IDS) do
+        local mr = al.getMemoryRecordByID(id)
+        if mr then pcall(function() mr.Active = true end) end
+    end
+end
+
+function ALU_attach()
+    local pid = ALU_findAsphalt()
+    if pid then
+        openProcess(pid)
+        local t = createTimer(nil, false)
+        t.Interval = ENABLE_DELAY_MS
+        t.OnTimer  = function(sender)
+            sender.Enabled = false
+            sender.destroy()
+            ALU_enableScripts()
+        end
+        t.Enabled = true
+        return true
+    end
+    return false
+end
+
+if not ALU_attach() then
+    ALU_scanTimer = createTimer(nil, false)
+    ALU_scanTimer.Interval = POLL_MS
+    ALU_scanTimer.OnTimer  = function(sender)
+        if ALU_attach() then
+            sender.Enabled = false
+            sender.destroy()
+            ALU_scanTimer = nil
+        end
+    end
+    ALU_scanTimer.Enabled = true
+end
+  </LuaScript>
+</CheatTable>
