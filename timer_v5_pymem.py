@@ -191,8 +191,8 @@ class ALUTimingTool:
         seconds = (timer_us % 60000000) // 1000000
         microseconds = (timer_us % 1000000)
         if ms:
-            milliseconds = microseconds // 1000
-            return f"{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+            milliseconds = microseconds / 1000
+            return f"{minutes:02d}:{seconds:02d}.{round(milliseconds):03d}"
         return f"{minutes:02d}:{seconds:02d}.{microseconds:06d}"
 
     # ------------------------------------------------------------------
@@ -240,11 +240,11 @@ class ALUTimingTool:
             and race_state_val % 33333 != 0
             and (race_state_val - timer_raw_us) > ALUTimingTool.RACE_ENDED_THRESHOLD_US
         ):
-            return "ended"
+            return "ended_sp"
         elif estimated_finish_us:
-            return "ended"
+            return "ended_pl"
         else:
-            return "racing"
+            return "racing_pl" if race_state_val % 33333 == 0 else "racing_sp"
 
     @staticmethod
     def _check_finish_trigger_new(
@@ -270,7 +270,7 @@ class ALUTimingTool:
     # Race state transitions
     # ------------------------------------------------------------------
 
-    def _handle_race_completion(self):
+    def _handle_race_completion(self, from_pl_finish=False):
         """Handle definitive race completion: record time and prompt save."""
         if self.race_completed:
             return
@@ -281,6 +281,7 @@ class ALUTimingTool:
 
         # --- Console comparison log ---
         print("═" * 55)
+        print("FROM PL FINISH DETECTION" if from_pl_finish else "FROM SINGLEPLAYER DETECTION")
         print(f"  FINISH ESTIMATE                  : {self._format_timer(estimate)}  ({estimate}us)")
         print(f"  TRUE FINAL (last raw timer)      : {self._format_timer(true_final)}  ({true_final}us)")
         diff = abs(true_final - estimate)
@@ -288,7 +289,7 @@ class ALUTimingTool:
         print("═" * 55)
 
         # Use the finish estimate if available; fall back to true final.
-        final_time = estimate if estimate > 0 else true_final
+        final_time = estimate if from_pl_finish and estimate > 0 else true_final
         self.estimated_finish_us = final_time
         self.current_timer_display = self._format_timer(final_time, ms=True)
         self.ui.update_delta("−−.−−−")
@@ -347,9 +348,9 @@ class ALUTimingTool:
                 delta_seconds = self.race_data_manager.calculate_delta(current_progress, timer_us)
                 if delta_seconds is not None:
                     sign = "+" if delta_seconds >= 0 else "−"
-                    if abs(delta_seconds) < 10.0: delta_str = f"{sign}{abs(delta_seconds):.3f}"
-                    elif abs(delta_seconds) < 100.0: delta_str = f"{sign}{abs(delta_seconds):.2f}"
-                    else: delta_str = f"{sign}{abs(delta_seconds):.1f}"
+                    if abs(delta_seconds) < 10.0: delta_str = f"{sign}{round(abs(delta_seconds), 3):.3f}"
+                    elif abs(delta_seconds) < 100.0: delta_str = f"{sign}{round(abs(delta_seconds), 2):.2f}"
+                    else: delta_str = f"{sign}{round(abs(delta_seconds), 1):.1f}"
                     self.last_valid_delta = delta_str
                     self.ui.update_delta(delta_str)
                     self.ui.update_background_color("race", delta_seconds)
@@ -437,7 +438,7 @@ class ALUTimingTool:
             # -- State transitions -------------------------------------
 
             # Transition INTO racing — start recording.
-            if game_state == "racing" and not self.race_in_progress:
+            if game_state in ("racing_pl", "racing_sp") and not self.race_in_progress:
                 if self.race_completed or progress_raw > 0:
                     self.reset_race_state()
                 self.race_in_progress = True
@@ -447,10 +448,15 @@ class ALUTimingTool:
                 print("Race active — recording")
 
             # Transition to "ended" — game says race finished.
-            if game_state == "ended" and prev_game_state == "racing":
+            if game_state == "ended_sp" and prev_game_state == "racing_sp":
+                self._handle_race_completion(True)
                 if not self.race_completed and self.race_in_progress:
                     print("Game state: Race Ended")
                     self._handle_race_completion()
+            elif game_state == "ended_pl" and prev_game_state == "racing_pl":
+                if not self.race_completed and self.race_in_progress:
+                    print("Game state: Race Ended")
+                    self._handle_race_completion(True)
 
             # Transition to "menus" — player left
             if game_state == "menus" and prev_game_state != "menus":
@@ -477,8 +483,8 @@ class ALUTimingTool:
             prev_game_state = game_state
 
             # -- Only process data while actually racing ---------------
-            actively_racing = game_state == "racing" and self.race_in_progress
-
+            actively_racing = game_state in ("racing_pl", "racing_sp") and self.race_in_progress
+            is_pl = game_state == "racing_pl" and self.race_in_progress
             # -- Finish trigger ----------------------------------------
             if game_state in ("menus", "starting"):
                 self.estimated_finish_us = None
@@ -492,7 +498,7 @@ class ALUTimingTool:
                 self._progress_legitimized = True
             if actively_racing and not self.race_completed:
                 self._final_timer_us = timer_raw_us
-            if not self._finish_locked and self._progress_legitimized:
+            if not self._finish_locked and self._progress_legitimized and is_pl:
                 finish_us = self._check_finish_trigger_new(
                     progress_raw, self._prev_progress, timer_raw_us, self._prev_timer_us
                 )

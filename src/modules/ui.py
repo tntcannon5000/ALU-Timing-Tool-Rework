@@ -485,7 +485,7 @@ class TimingToolUI:
             seconds = raw_us / 1000000.0
             m = int(seconds // 60)
             s = seconds - (m * 60)
-            return f"{m}:{s:06.3f}"
+            return f"{m}:{round(s,3):06.3f}"
         except Exception:
             return "--:--.---"
 
@@ -495,7 +495,7 @@ class TimingToolUI:
                 return "--.---"
             sign = '-' if delta_us <= 0 else '+'
             s = abs(delta_us) / 1000000.0
-            return f"{sign}{s:0.3f}"
+            return f"{sign}{round(s,3):06.3f}"
         except Exception:
             return "--.---"
 

@@ -551,6 +551,13 @@ class DataExtractor:
         self._deferred_prog_inj:   Optional[int]   = None
         self._deferred_prog_orig:  Optional[bytes] = None
 
+        # ── Emergency cleanup: live temporary hooks ───────────────────────
+        # Populated in Step 3 of _capture_addresses(), cleared in Steps 6+8.
+        # Used by _emergency_remove_temp_hooks() to restore dangling JMP patches
+        # if the program exits mid-capture or while deferred progress is pending.
+        self._live_temp_patches: dict = {}   # {inj_addr: orig_bytes}
+        self._live_temp_allocs:  list = []   # stub page addresses not yet freed
+
         # ── Change-detection state (for synchronous read()) ──────────────
         self._prev_vt:           int            = -1    # last VT seen by read()
         self._prev_vals: Optional[dict]         = None  # last returned value dict
@@ -589,7 +596,8 @@ class DataExtractor:
             self._install_vt_hook()
 
     def stop(self) -> None:
-        """Remove the permanent VT hook and release all resources."""
+        """Remove all hooks (permanent VT + any live temporary hooks) and release resources."""
+        self._emergency_remove_temp_hooks()
         self._remove_vt_hook()
         print("[DataExtractor] Stopped")
 
@@ -862,6 +870,61 @@ class DataExtractor:
         self._inj_vt       = None
         self._vt_installed = False
 
+    def _emergency_remove_temp_hooks(self) -> None:
+        """
+        Restore any live temporary JMP patches and free orphaned stub pages.
+
+        Called from stop() so that the game binary is left clean when the
+        program exits, even if it is closed mid-capture or while a deferred
+        progress hook is still active.  Without this, restarting the tool
+        finds modified bytes at the hook sites instead of the expected AOB
+        patterns, causing fatal errors on the next AOB scan.
+        """
+        if not self._pm:
+            return
+
+        patches_to_restore: dict = {}
+
+        # Any patches from the main capture cycle that weren't cleaned up yet
+        # (e.g. program closed during Step 4 poll while JMP patches were live).
+        if self._live_temp_patches:
+            patches_to_restore.update(self._live_temp_patches)
+
+        # Deferred progress patch — left live after fast exit, pending background thread.
+        if self._deferred_prog_inj and self._deferred_prog_orig:
+            patches_to_restore[self._deferred_prog_inj] = self._deferred_prog_orig
+
+        if patches_to_restore:
+            print(f"[DataExtractor] Emergency cleanup: restoring "
+                  f"{len(patches_to_restore)} live JMP patch(es)…")
+            try:
+                pid = self._pm.process_id
+                th  = _freeze_threads(pid)
+                try:
+                    self._restore_patches(patches_to_restore)
+                finally:
+                    _unfreeze_threads(th)
+                print("[DataExtractor] Emergency cleanup: all patches restored.")
+            except Exception as exc:
+                print(f"[DataExtractor] ⚠ Emergency cleanup error: {exc}")
+            self._live_temp_patches = {}
+
+        # Free any orphaned stub pages (alloc1/2 freed in Step 8, alloc3 may
+        # remain if deferred capture was still running at exit).
+        allocs_to_free = list(self._live_temp_allocs)
+        if self._deferred_prog_alloc:
+            allocs_to_free.append(self._deferred_prog_alloc)
+        for alloc in allocs_to_free:
+            try:
+                _vfree(self._pm.process_handle, alloc)
+            except Exception:
+                pass
+
+        self._live_temp_allocs    = []
+        self._deferred_prog_alloc = None
+        self._deferred_prog_inj   = None
+        self._deferred_prog_orig  = None
+
     # -----------------------------------------------------------------------
     # Pre-scan helpers + freeze-capture cycle (temporary hooks 1–3)
     # -----------------------------------------------------------------------
@@ -1098,6 +1161,9 @@ class DataExtractor:
             self._write_patch(inj2, p2, saved_temp)
             self._write_patch(inj3, p3, saved_temp)
             print(f"[DataExtractor]   ✓ All {len(saved_temp)} patches written successfully")
+            # Track for emergency cleanup on stop() — cleared in Steps 6+8
+            self._live_temp_patches = dict(saved_temp)
+            self._live_temp_allocs  = [a for a in (alloc1, alloc2, alloc3) if a]
         except Exception as exc:
             if self.FREEZE_FOR_CAPTURE:
                 _unfreeze_threads(thread_handles)
@@ -1232,6 +1298,9 @@ class DataExtractor:
             deferred = True
         print("[DataExtractor] [Step 6/8] Patches restored "
               f"({'3/3' if not deferred else '2/3 — progress deferred'})")
+        # Non-deferred patches are no longer live; clear from emergency tracker.
+        # Deferred patch (if any) is tracked via _deferred_prog_inj/_orig instead.
+        self._live_temp_patches = {}
 
         # ── Step 7: UNFREEZE permanently ─────────────────────────────────
         print("[DataExtractor] [Step 7/8] Unfreezing game permanently…")
@@ -1256,6 +1325,7 @@ class DataExtractor:
         else:
             try: _vfree(handle, alloc3)
             except Exception: pass
+        self._live_temp_allocs = []   # alloc1+2 freed above; alloc3 freed or deferred
 
         if rdi_dash and rdi_timer:
             self._rdi_dash    = rdi_dash
@@ -1403,6 +1473,41 @@ class DataExtractor:
                 return False
 
         # ── 7. Change detection ────────────────────────────────────────
+        # Only trigger on timer_raw or visual_timer changes.  timer_raw
+        # increments on every game data frame during a race; visual_timer
+        # handles menus / pre-race state transitions.  Progress, rpm, and
+        # gear are NOT used for change detection — they are picked up in
+        # the stabilised second read below.
+        prev         = self._prev_vals
+        prev_timer   = prev["timer_raw"]    if prev else None
+        prev_vt_val  = prev["visual_timer"] if prev else None
+        changed      = (prev is None) or (timer_raw != prev_timer) or (current_vt != prev_vt_val)
+        self._prev_vt = current_vt
+
+        if not changed:
+            return False
+
+        # ── 7b. Stabilising second read ───────────────────────────────
+        # Sleep 1 ms so the game engine has time to finish writing all
+        # fields for the current frame, then re-read everything.  This
+        # ensures timer_raw, progress, rpm, and gear are all from the
+        # same game update rather than a mix of two adjacent frames.
+        # If the second read fails, fall back to first-read values.
+        time.sleep(0.001)
+        if self._direct_mode:
+            try:
+                pm = self._pm
+                if self._rdi_timer:
+                    timer_raw = pm.read_uint(self._rdi_timer + 0x10)
+                if self._rdi_progress:
+                    progress  = pm.read_float(self._rdi_progress + 0x1D8)
+                if self._rdi_dash:
+                    rpm  = int(pm.read_float(self._rdi_dash + 0x1B8))
+                    gear = pm.read_uint(self._rdi_dash + 0xA0)
+                current_vt = self._pm.read_uint(self._alloc_vt)
+            except Exception:
+                pass  # keep first-read values if second read fails
+
         new_vals = {
             "timer_raw":    timer_raw,
             "progress":     progress,
@@ -1410,13 +1515,7 @@ class DataExtractor:
             "gear":         gear,
             "visual_timer": current_vt,
         }
-        prev           = self._prev_vals
-        changed        = (prev is None) or (new_vals != prev)
-        self._prev_vt   = current_vt
         self._prev_vals = new_vals
-
-        if not changed:
-            return False
 
         # ── 8. Commit updated state ────────────────────────────────────
         self.reads_ok += 1
