@@ -135,8 +135,8 @@ class RaceDataManager:
                 "fingerprint": "ALU_TOOL",
                 "progress": self.current_progress_data.tolist(),
                 "times": self.current_time_data.tolist(),
-                "split_progress": self.split_progress.tolist() if self.split_progress is not None else self.current_progress_data.tolist(),
-                "split_times": self.split_times.tolist() if self.split_times is not None else self.current_time_data.tolist(),
+                "split_progress": self.split_progress.tolist() if self.is_split_loaded else self.current_progress_data.tolist(),
+                "split_times": self.split_times.tolist() if self.is_split_loaded else self.current_time_data.tolist(),
                 "splits": self.splits if self.splits is not None else None,
             }
             

@@ -49,6 +49,7 @@ After capture, direct-read offsets used:
 
 import ctypes
 import ctypes.wintypes as wintypes
+import math
 import re
 import struct
 import threading
@@ -460,6 +461,40 @@ def _build_vt_stub(alloc_base: int, return_addr: int) -> bytes:
     return bytes(bytearray(_CODE_OFFSET) + code)
 
 
+def _build_local_player_stub(alloc_base: int, return_addr: int) -> bytes:
+    """
+    Hook: mov [rbx+08],rax       (48 89 43 08 — 4 bytes)
+          movss xmm1,[r14+130h] (F3 41 0F 10 8E 30 01 00 00 — 9 bytes)
+    Total hooksite: 13 bytes → patch with JMP(5) + NOP×8
+
+    Data layout at alloc_base:
+      +0 : local_player_ptr_struct_val (qword, 8 bytes) — captured rax
+           Player base = [rax + local_struct_offset]
+           Velocity X/Y/Z at player_base + 0x160 / 0x164 / 0x168
+    """
+    code_base = alloc_base + _CODE_OFFSET
+    code = bytearray()
+
+    def pos() -> int:
+        return code_base + len(code)
+
+    # ── original instruction 1: mov [rbx+08],rax ─────────────────────────
+    code += b"\x48\x89\x43\x08"
+
+    # ── capture rax → local_player_ptr_struct_val (+0) ───────────────────
+    # mov [rip+XX],rax                                   48 89 05 <rel32>
+    code += b"\x48\x89\x05"
+    code += _rel32(pos() + 4, alloc_base + 0)
+
+    # ── original instruction 2: movss xmm1,[r14+0x130] ───────────────────
+    code += b"\xF3\x41\x0F\x10\x8E\x30\x01\x00\x00"
+
+    # ── JMP back ─────────────────────────────────────────────────────────
+    code += _jmp_back(pos(), return_addr)
+
+    return bytes(bytearray(_CODE_OFFSET) + code)
+
+
 # ---------------------------------------------------------------------------
 # DataExtractor — drop-in replacement for CheatEngineClient
 # ---------------------------------------------------------------------------
@@ -500,6 +535,19 @@ class DataExtractor:
     _VT_STATIC_OFFSET = 0x5CC82F
     _VT_EXPECTED      = b"\x48\x33\xC6\x41\xBE\x10\x00\x00\x00"
     _AOB_VT           = re.escape(_VT_EXPECTED)
+
+    # Hook 5 — Local Player Ptr: mov [rbx+08],rax + movss xmm1,[r14+130h] (13 bytes)
+    # Captures rax = localPlayerPtrStruct value used to derive player_base.
+    _AOB_LOCAL_PLAYER_PTR = re.escape(
+        b"\x48\x89\x43\x08"                    # mov [rbx+08],rax   (4)
+        b"\xF3\x41\x0F\x10\x8E\x30\x01\x00\x00"  # movss xmm1,[r14+130h] (9)
+    )  # total 13 bytes — patch with JMP(5) + NOP×8
+
+    # For reading the struct offset embedded in: mov rax,[rcx+NNNNNNNN]
+    # Scan for the fixed bytes that follow it to locate the displacement.
+    _AOB_LOCAL_STRUCT_OFFSET_CTX = re.escape(
+        b"\x83\xB8\x04\x01\x00\x00\x02\x0F\x95\xC0"
+    )  # cmp dword ptr [rax+104h],2 ; setne al
 
     PROCESS_NAME = "Asphalt9_Steam_x64_rtl.exe"
 
@@ -564,6 +612,15 @@ class DataExtractor:
         self._first_read_logged: bool           = False
         self._last_vt_log:       float          = 0.0   # timestamp for periodic VT log
 
+        # ── Local player pointer (for velocity) ────────────────────────────
+        # Captured via Hook 5 during _capture_addresses().
+        # _local_player_ptr_val = captured rax at the hook site
+        # _local_struct_offset  = displacement from the struct-offset instruction
+        # player_base each frame = [_local_player_ptr_val + _local_struct_offset]
+        # Velocity X/Y/Z at player_base + 0x160 / 0x164 / 0x168
+        self._local_player_ptr_val: Optional[int] = None
+        self._local_struct_offset:  int           = 0   # set by _read_local_struct_offset
+
         # ── Latest telemetry (protected by _lock) ────────────────────────
         self._lock           = threading.Lock()
         self._timer_raw:     int   = 0
@@ -571,6 +628,7 @@ class DataExtractor:
         self._rpm:           int   = 1250
         self._gear:          int   = 0
         self._visual_timer:  int   = 0
+        self._velocity_kmh:  float = 0.0
         self._connected:     bool  = False
         self._last_ok:       float = 0.0
 
@@ -594,6 +652,8 @@ class DataExtractor:
             self._attach()
         if self._pm is not None and not self._vt_installed:
             self._install_vt_hook()
+        if self._pm is not None and self._local_struct_offset == 0:
+            self._read_local_struct_offset()
 
     def stop(self) -> None:
         """Remove all hooks (permanent VT + any live temporary hooks) and release resources."""
@@ -617,6 +677,7 @@ class DataExtractor:
                 "rpm":          self._rpm,
                 "gear":         self._gear,
                 "visual_timer": self._visual_timer,
+                "velocity_kmh": self._velocity_kmh,
             }
 
     def get_timer_ms(self) -> int:
@@ -640,6 +701,11 @@ class DataExtractor:
         with self._lock:
             return self._gear
 
+    def get_velocity(self) -> float:
+        """Return the current speed magnitude in km/h."""
+        with self._lock:
+            return self._velocity_kmh
+
     def is_connected(self) -> bool:
         with self._lock:
             return self._connected
@@ -653,6 +719,7 @@ class DataExtractor:
                 "visual_timer":    self._visual_timer,
                 "rpm":             self._rpm,
                 "gear":            self._gear,
+                "velocity_kmh":    self._velocity_kmh,
             }
 
     # -----------------------------------------------------------------------
@@ -674,6 +741,31 @@ class DataExtractor:
             self._pm = None
             self._last_fail_reason = f"attach_failed: {exc}"
             return False
+
+    def _read_local_struct_offset(self) -> None:
+        """
+        Read the local player struct offset from the displacement embedded in the
+        game instruction: mov rax,[rcx+NNNNNNNN]
+
+        Scans for the fixed bytes that follow that instruction (cmp + setne), then
+        reads the 4-byte little-endian displacement from match-4.  Falls back to
+        0x90 (the typical value) if the scan fails.
+        """
+        try:
+            match = self._aob_scan(self._AOB_LOCAL_STRUCT_OFFSET_CTX)
+            if match is None:
+                print("[DataExtractor] \u26a0 Local struct offset AOB not found \u2014 using default 0x90")
+                self._local_struct_offset = 0x90
+                return
+            # The 10-byte pattern starts at `match`.
+            # The 7-byte instruction before it ends at match-1, so its displacement
+            # is at bytes match-4 through match-1 (4-byte little-endian DWORD).
+            offset_val = self._pm.read_uint(match - 4)
+            self._local_struct_offset = offset_val
+            print(f"[DataExtractor] Local player struct offset = {offset_val:#x}")
+        except Exception as exc:
+            print(f"[DataExtractor] \u26a0 Could not read local struct offset: {exc} \u2014 using default 0x90")
+            self._local_struct_offset = 0x90
 
     def _aob_scan(self, pattern: bytes) -> Optional[int]:
         """
@@ -1130,6 +1222,32 @@ class DataExtractor:
                   f"timer={len(stub2)}B@{alloc2:#x}, "
                   f"prog={len(stub3)}B@{alloc3:#x}")
 
+        # ── Hook 5 (Local Player Ptr): always freshly allocated ───────────
+        # Scan for inj4 (cached after first scan); alloc4 is never prescanned.
+        inj4:   Optional[int] = None
+        alloc4: Optional[int] = None
+        if 4 not in self._cached_injs:
+            _inj4 = self._aob_scan(self._AOB_LOCAL_PLAYER_PTR)
+            if _inj4:
+                self._cached_injs[4] = _inj4
+                print(f"[DataExtractor] Hook 5 (local player ptr) AOB @ {_inj4:#x}")
+            else:
+                print("[DataExtractor] \u26a0 Local player ptr AOB not found \u2014 velocity unavailable")
+        if 4 in self._cached_injs:
+            inj4 = self._cached_injs[4]
+        if inj4:
+            try:
+                alloc4 = _valloc_near(handle, inj4)
+                stub4  = _build_local_player_stub(alloc4, inj4 + 13)
+                self._pm.write_bytes(alloc4, stub4, len(stub4))
+                print(f"[DataExtractor] Hook 5 stub: {len(stub4)}B @ {alloc4:#x}")
+            except Exception as exc:
+                print(f"[DataExtractor] \u26a0 Hook 5 alloc/write failed: {exc} \u2014 velocity unavailable")
+                if alloc4:
+                    try: _vfree(handle, alloc4)
+                    except Exception: pass
+                alloc4 = None
+
         # ── Step 3: (optionally FREEZE) + patch ──────────────────────────
         saved_temp: dict = {}
         print(f"[DataExtractor] [Step 3/8] FREEZE_FOR_CAPTURE={self.FREEZE_FOR_CAPTURE}")
@@ -1138,7 +1256,7 @@ class DataExtractor:
             if not thread_handles:
                 print("[DataExtractor]   ✗ FATAL: _freeze_threads returned 0 handles — "
                       "could not freeze any game threads. Check process permissions.")
-                for a in (alloc1, alloc2, alloc3):
+                for a in (alloc1, alloc2, alloc3, alloc4):
                     if a:
                         try: _vfree(handle, a)
                         except Exception: pass
@@ -1160,15 +1278,19 @@ class DataExtractor:
             self._write_patch(inj1, p1, saved_temp)
             self._write_patch(inj2, p2, saved_temp)
             self._write_patch(inj3, p3, saved_temp)
+            if alloc4 and inj4:
+                p4 = _jmp_rel32(inj4, alloc4 + _CODE_OFFSET) + b"\x90" * 8  # 5+8=13 bytes
+                self._write_patch(inj4, p4, saved_temp)
+                print(f"    localp@ {inj4:#x}: {p4.hex(' ')}")
             print(f"[DataExtractor]   ✓ All {len(saved_temp)} patches written successfully")
             # Track for emergency cleanup on stop() — cleared in Steps 6+8
             self._live_temp_patches = dict(saved_temp)
-            self._live_temp_allocs  = [a for a in (alloc1, alloc2, alloc3) if a]
+            self._live_temp_allocs  = [a for a in (alloc1, alloc2, alloc3, alloc4) if a]
         except Exception as exc:
             if self.FREEZE_FOR_CAPTURE:
                 _unfreeze_threads(thread_handles)
             self._restore_patches(saved_temp)
-            for a in (alloc1, alloc2, alloc3):
+            for a in (alloc1, alloc2, alloc3, alloc4):
                 if a:
                     try: _vfree(handle, a)
                     except Exception: pass
@@ -1203,24 +1325,26 @@ class DataExtractor:
                     capture_aborted = True
                     break
 
-                prog_rdi  = self._pm.read_ulonglong(alloc3 + 4)
-                dash_rdi  = self._pm.read_ulonglong(alloc1 + 12)
-                timer_rdi = self._pm.read_ulonglong(alloc2 + 8)
+                prog_rdi   = self._pm.read_ulonglong(alloc3 + 4)
+                dash_rdi   = self._pm.read_ulonglong(alloc1 + 12)
+                timer_rdi  = self._pm.read_ulonglong(alloc2 + 8)
+                lp_ptr_raw = self._pm.read_ulonglong(alloc4) if alloc4 else 0
                 now     = time.monotonic()
                 elapsed = now - t0
                 if now >= _next_poll_log:
                     print(f"[DataExtractor]   polling @ {elapsed:.1f}s: "
                           f"prog_rdi={prog_rdi:#x}  dash_rdi={dash_rdi:#x}  "
-                          f"timer_rdi={timer_rdi:#x}  vt={vt_now}")
+                          f"timer_rdi={timer_rdi:#x}  lp_ptr={lp_ptr_raw:#x}  vt={vt_now}")
                     _next_poll_log = now + 0.5
 
-                # Fast exit: dash+timer both available (elapsed ≥ 0.1 s to let
-                # the first frame settle).  Deferred progress if not yet fired.
-                if dash_rdi > 0x10000 and timer_rdi > 0x10000 and elapsed >= 0.1:
+                # Fast exit: dash+timer+lp_ptr all available (elapsed ≥ 0.1 s).
+                # Deferred progress if not yet fired.
+                lp_ready = (alloc4 is None) or (lp_ptr_raw > 0x10000)
+                if dash_rdi > 0x10000 and timer_rdi > 0x10000 and lp_ready and elapsed >= 0.1:
                     rdi_captured = True
                     fast_exit    = prog_rdi <= 0x10000
                     label = "fast exit — deferring progress" if fast_exit else "full exit"
-                    print(f"[DataExtractor]   ✓ Dash+timer captured ({label}, "
+                    print(f"[DataExtractor]   ✓ Dash+timer+lp_ptr captured ({label}, "
                           f"{elapsed:.2f}s after unfreeze)")
                     break
 
@@ -1258,6 +1382,7 @@ class DataExtractor:
         rdi_progress: Optional[int] = None
         rdi_dash:     Optional[int] = None
         rdi_timer:    Optional[int] = None
+        local_player_ptr: Optional[int] = None
 
         try:
             _prog  = self._pm.read_ulonglong(alloc3 + 4)
@@ -1280,14 +1405,22 @@ class DataExtractor:
                 print(f"[DataExtractor] ✓ rdi_timer    = {_timer:#x}  (timer @ +0x10)")
             else:
                 print(f"[DataExtractor] ✗ rdi_timer not captured ({_timer:#x})")
+            if alloc4:
+                _lp = self._pm.read_ulonglong(alloc4)
+                if _lp > 0x10000:
+                    local_player_ptr = _lp
+                    print(f"[DataExtractor] ✓ local_player_ptr = {_lp:#x}  "
+                          f"(velocity @ player_base+0x160/164/168)")
+                else:
+                    print(f"[DataExtractor] ⚠ local_player_ptr not captured ({_lp:#x})")
         except Exception as exc:
             print(f"[DataExtractor] ✗ Failed to read captured rdis: {exc}")
 
-        # Restore dash+timer patches unconditionally.
+        # Restore dash+timer+local_player patches unconditionally.
         # For progress: restore only if already captured; if deferred, leave the
         # JMP patch active so the background thread can still use the stub.
         prog_orig_bytes = saved_temp.pop(inj3, None)   # remove from dict, keep value
-        self._restore_patches(saved_temp)              # restores dash + timer
+        self._restore_patches(saved_temp)              # restores dash + timer + local_player
         if rdi_progress is not None:
             # Progress captured — restore its patch too
             if prog_orig_bytes:
@@ -1296,8 +1429,9 @@ class DataExtractor:
         else:
             # Deferred: leave JMP patch at inj3 live for background thread
             deferred = True
-        print("[DataExtractor] [Step 6/8] Patches restored "
-              f"({'3/3' if not deferred else '2/3 — progress deferred'})")
+        total_patched = 4 if (alloc4 and inj4) else 3
+        _prog_label = f"{total_patched-1}/{total_patched} — progress deferred" if deferred else f"{total_patched}/{total_patched}"
+        print(f"[DataExtractor] [Step 6/8] Patches restored ({_prog_label})")
         # Non-deferred patches are no longer live; clear from emergency tracker.
         # Deferred patch (if any) is tracked via _deferred_prog_inj/_orig instead.
         self._live_temp_patches = {}
@@ -1311,7 +1445,7 @@ class DataExtractor:
                  if deferred else " — zero temporary hooks active"))
 
         # ── Step 8: Free stubs / launch deferred thread ──────────────────
-        for alloc in (alloc1, alloc2):
+        for alloc in (alloc1, alloc2, alloc4):  # alloc4 never deferred
             if alloc:
                 try: _vfree(handle, alloc)
                 except Exception: pass
@@ -1332,8 +1466,11 @@ class DataExtractor:
             self._rdi_timer   = rdi_timer
             if rdi_progress:
                 self._rdi_progress = rdi_progress
+            if local_player_ptr:
+                self._local_player_ptr_val = local_player_ptr
             self._direct_mode = True
-            print(f"[DataExtractor] Direct-read mode active")
+            print(f"[DataExtractor] Direct-read mode active"
+                  + (f", velocity available (lp_ptr={local_player_ptr:#x})" if local_player_ptr else ", velocity unavailable (lp_ptr not captured)"))
             return True
         else:
             return False
@@ -1392,9 +1529,9 @@ class DataExtractor:
         # Periodic VT diagnostic — print every 2 s so we can see what the hook captures.
         _now_ts = time.time()
         if _now_ts - self._last_vt_log >= 2.0:
-            print(f"[DataExtractor] VT tick: raw={current_vt}  prev={self._prev_vt}  "
-                  f"direct_mode={self._direct_mode}  "
-                  f"stub_addr={self._alloc_vt:#x}")
+            #print(f"[DataExtractor] VT tick: raw={current_vt}  prev={self._prev_vt}  "
+            #      f"direct_mode={self._direct_mode}  "
+            #      f"stub_addr={self._alloc_vt:#x}")
             if current_vt not in (0, 1_000_000) and not (current_vt > 0x10000):
                 print(f"[DataExtractor]   ⚠ VT={current_vt} is unexpectedly small — "
                        "expected exactly 1,000,000 in menus or a large counter in-race.")
@@ -1426,6 +1563,7 @@ class DataExtractor:
             self._rdi_progress = None
             self._rdi_dash     = None
             self._rdi_timer    = None
+            self._local_player_ptr_val = None
             ok = self._capture_addresses()
             if not ok:
                 print("[DataExtractor] Capture failed — "
@@ -1438,14 +1576,16 @@ class DataExtractor:
             self._rdi_progress = None
             self._rdi_dash     = None
             self._rdi_timer    = None
+            self._local_player_ptr_val = None
             self._first_read_logged = False
             print("[DataExtractor] Returned to menus — direct-read mode cleared")
 
         # ── 6. Read telemetry values ───────────────────────────────────
-        timer_raw:  int   = 0
-        progress:   float = 0.0
-        rpm:        int   = 1250
-        gear:       int   = 0
+        timer_raw:    int   = 0
+        progress:     float = 0.0
+        rpm:          int   = 1250
+        gear:         int   = 0
+        velocity_kmh: float = 0.0
 
         if self._direct_mode:
             try:
@@ -1459,6 +1599,14 @@ class DataExtractor:
                 if self._rdi_dash:
                     rpm  = int(pm.read_float(self._rdi_dash + 0x1B8))  # cvttss2si truncate
                     gear = pm.read_uint(self._rdi_dash + 0xA0)
+                if self._local_player_ptr_val and self._local_struct_offset:
+                    player_base = pm.read_ulonglong(
+                        self._local_player_ptr_val + self._local_struct_offset
+                    )
+                    vx = pm.read_float(player_base + 0x160)
+                    vz = pm.read_float(player_base + 0x164)
+                    vy = pm.read_float(player_base + 0x168)
+                    velocity_kmh = math.sqrt(vx*vx + vz*vz + vy*vy) * 3.6
             except Exception as exc:
                 self._last_fail_reason = str(exc)
                 self.reads_failed += 1
@@ -1467,6 +1615,7 @@ class DataExtractor:
                 self._rdi_progress = None
                 self._rdi_dash     = None
                 self._rdi_timer    = None
+                self._local_player_ptr_val = None
                 self._prev_vt = current_vt
                 with self._lock:
                     self._connected = False
@@ -1504,6 +1653,14 @@ class DataExtractor:
                 if self._rdi_dash:
                     rpm  = int(pm.read_float(self._rdi_dash + 0x1B8))
                     gear = pm.read_uint(self._rdi_dash + 0xA0)
+                if self._local_player_ptr_val and self._local_struct_offset:
+                    player_base = pm.read_ulonglong(
+                        self._local_player_ptr_val + self._local_struct_offset
+                    )
+                    vx = pm.read_float(player_base + 0x160)
+                    vz = pm.read_float(player_base + 0x164)
+                    vy = pm.read_float(player_base + 0x168)
+                    velocity_kmh = math.sqrt(vx*vx + vz*vz + vy*vy) * 3.6
                 current_vt = self._pm.read_uint(self._alloc_vt)
             except Exception:
                 pass  # keep first-read values if second read fails
@@ -1514,6 +1671,7 @@ class DataExtractor:
             "rpm":          rpm,
             "gear":         gear,
             "visual_timer": current_vt,
+            "velocity_kmh": velocity_kmh,
         }
         self._prev_vals = new_vals
 
@@ -1524,6 +1682,7 @@ class DataExtractor:
             self._progress_raw = progress
             self._rpm          = rpm
             self._gear         = gear
+            self._velocity_kmh = velocity_kmh
             self._visual_timer = current_vt
             self._connected    = True
             self._last_ok      = time.time()
@@ -1532,7 +1691,7 @@ class DataExtractor:
             print(
                 f"[DataExtractor] First direct read: "
                 f"timer={timer_raw}, progress={progress:.4f}, gear={gear}, "
-                f"vt={current_vt}, rpm={rpm}"
+                f"vt={current_vt}, rpm={rpm}, velocity={velocity_kmh:.1f}km/h"
             )
             self._first_read_logged = True
 

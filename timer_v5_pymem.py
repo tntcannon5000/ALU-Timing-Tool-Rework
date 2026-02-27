@@ -79,7 +79,7 @@ class ALUTimingTool:
 
         # UI throttling
         self.last_ui_update: float = 0.0
-        self.ui_update_interval: float = 1.0 / 48.0  # ~48 fps
+        self.ui_update_interval: float = 1.0 / 70.0  # ~70 fps
 
         # Setup UI callbacks
         self.ui.set_callbacks(
@@ -231,8 +231,15 @@ class ALUTimingTool:
 
         Returns one of: 'menus', 'starting', 'racing', 'ended'
         """
-        if (race_state_val == 1000000 or race_state_val == 0) and (gear == 1 or gear == 0) and rpm == 1250:
-            return "menus"
+        # Guard: if all physics/timer values are at idle (timer stopped, no
+        # progress, neutral gear, idle RPM) it cannot be a live race regardless
+        # of what VT says.  This catches the brief VT glitch that can occur
+        # immediately after returning to menus, where the VT stub still holds
+        # the last in-race value instead of 1,000,000.
+        if timer_raw_us == 0 and progress_raw == 0.0 and rpm == 1250 and gear == 0:
+            return "menus" if race_state_val != 0 else "starting"
+        if (race_state_val == 1000000 or race_state_val == 0) and (gear == 1 or gear == 0) and rpm == 1250 and timer_raw_us == 0 and progress_raw == 0.0:
+            return "menus" if race_state_val == 1000000 else "starting"
         elif (
             race_state_val != 0         # skip VT-divergence check when VT is disabled (always 0)
             and timer_raw_us > 0
@@ -343,7 +350,7 @@ class ALUTimingTool:
         current_mode = self.ui.get_current_mode()
         ghost_loaded = self.race_data_manager.is_ghost_loaded()
 
-        if current_mode == "race" and ghost_loaded and self.race_in_progress:
+        if current_mode == "Race vs Ghost" and ghost_loaded and self.race_in_progress:
             if current_progress < 1:
                 delta_seconds = self.race_data_manager.calculate_delta(current_progress, timer_us)
                 if delta_seconds is not None:
@@ -353,15 +360,15 @@ class ALUTimingTool:
                     else: delta_str = f"{sign}{round(abs(delta_seconds), 1):.1f}"
                     self.last_valid_delta = delta_str
                     self.ui.update_delta(delta_str)
-                    self.ui.update_background_color("race", delta_seconds)
+                    self.ui.update_background_color("Race vs Ghost", delta_seconds)
                 else:
                     self.ui.update_delta("−−.−−−")
-                    self.ui.update_background_color("record")
+                    self.ui.update_background_color("Record Ghost")
             else:
                 self.ui.update_delta(self.last_valid_delta)
         else:
             self.ui.update_delta("−−.−−−")
-            self.ui.update_background_color("record")
+            self.ui.update_background_color("Record Ghost")
         if prev_pct == 0.0:
             print(f"Initial progress jump at {timer_us}us to {current_progress*100:.2f}% — recording from 0% baseline")
         return True
@@ -408,7 +415,7 @@ class ALUTimingTool:
                 # Sleep briefly to avoid busy-spinning, then skip this tick.
                 systime.sleep(0.001)
                 continue
-            [print(f"[DEBUG] Memory read: {vals}")]  # Debug log for each memory read
+            print(f"[DEBUG] Memory read: {vals}")  # Debug log for each memory read
             self.total_loops += 1
 
             timer_raw_us   = vals["timer_raw"]
@@ -416,6 +423,7 @@ class ALUTimingTool:
             race_state_val = vals["visual_timer"]
             gear           = vals["gear"]
             rpm            = vals["rpm"]
+            velocity_kmh   = vals.get("velocity_kmh", 0.0)
 
             # -- Periodic debug log ------------------------------------
             _now_mono = systime.perf_counter()
@@ -443,7 +451,7 @@ class ALUTimingTool:
                     self.reset_race_state()
                 self.race_in_progress = True
                 self.ui.update_delta("=0.000")
-                self.ui.update_background_color("race", 0)
+                self.ui.update_background_color("Race vs Ghost", 0)
                 self.ui.update_splits(timer_raw_us, progress_raw)
                 print("Race active — recording")
 
@@ -457,6 +465,11 @@ class ALUTimingTool:
                 if not self.race_completed and self.race_in_progress:
                     print("Game state: Race Ended")
                     self._handle_race_completion(True)
+
+            if game_state == "starting" and prev_game_state != "starting":
+                print("\nCountdown detected — resetting GUI for race start\n")
+                self.ui.update_timer("00:00.000")
+                self.ui.update_delta("−−.−−−")
 
             # Transition to "menus" — player left
             if game_state == "menus" and prev_game_state != "menus":
@@ -526,7 +539,7 @@ class ALUTimingTool:
             # -- Non-race UI reset -------------------------------------
             if not actively_racing and not self.race_completed:
                 self.ui.update_delta("−−.−−−")
-                self.ui.update_background_color("record")
+                self.ui.update_background_color("Record Ghost")
 
             # -- Throttled UI updates ----------------------------------
             now = systime.time()
@@ -535,6 +548,8 @@ class ALUTimingTool:
                 if self.race_data_manager.is_new_split_available():
                     self.ui.update_splits(timer_raw_us, progress_raw)
                 self.ui.update_percentage(self.percentage)
+                self.ui.update_gear_rpm(gear, rpm, actively_racing)
+                self.ui.update_velocity(velocity_kmh, actively_racing)
                 self.last_ui_update = now
 
             # -- Loop timing -------------------------------------------
@@ -556,7 +571,7 @@ class ALUTimingTool:
             "timer_us": self.current_timer_us,
             "race_in_progress": self.race_in_progress,
             "race_completed": self.race_completed,
-            "race_mode": self.ui.get_current_mode() if self.ui else "record",
+            "race_mode": self.ui.get_current_mode() if self.ui else "Record Ghost",
             "ghost_loaded": self.race_data_manager.is_ghost_loaded(),
             "ghost_filename": self.race_data_manager.get_ghost_filename(),
         }

@@ -7,6 +7,7 @@ Visually based on the original v4 UI design, with v5 features (splits, CE integr
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import ctypes
 import shutil
 import threading
 import sys
@@ -52,7 +53,7 @@ class TimingToolUI:
         self.race_panel = None
 
         # Track current background color to avoid unnecessary updates
-        self.current_bg_color = "#2c3e50"
+        self.current_bg_color = "#000000"
 
         # Race panel elements
         self.ghost_filename_label = None
@@ -67,6 +68,22 @@ class TimingToolUI:
         self.toggle_split_view_button = None
         self.configure_splits_button = None
         self.rows = []
+
+        # Gear / RPM bar elements
+        self.main_container = None
+        self.gear_rpm_frame = None
+        self.gear_label = None
+        self.rpm_canvas = None
+        self.gear_rpm_visible = False
+        self.current_gear = 0
+        self.current_rpm = 1250
+
+        # Velocity indicator elements
+        self.velocity_frame = None
+        self.velocity_label = None
+        self.velocity_visible = False
+        self.current_velocity = 0.0
+        self.velocity_height_shift = 0
 
         # Data to display
         self.current_timer_display = "00:00.000"
@@ -159,11 +176,11 @@ class TimingToolUI:
         if self.race_panel_expanded:
             self.race_panel.pack(side="top", fill="x", padx=0, pady=0)
             self.race_button.config(text="▴", bg="#e67e22")
-            # Show race control indicator
-            self.race_control_indicator.pack(side="left", padx=10, pady=5)
+            # If split view is visible, ensure it stays below the race panel.
+            if self.split_view_visible and self.split_view_frame:
+                self.split_view_frame.pack_forget()
+                self._repack_split_view()
         else:
-            # Hide race control indicator
-            self.race_control_indicator.pack_forget()
             self.race_panel.pack_forget()
             self.race_button.config(text="▾", bg="#e67e22")
             # Also collapse debug if open
@@ -171,7 +188,7 @@ class TimingToolUI:
                 self.debug_frame.pack_forget()
                 self.debug_expanded = False
                 if hasattr(self, 'debug_button') and self.debug_button:
-                    self.debug_button.config(text="🐛 Debug", bg="#3498db")
+                    self.debug_button.config(bg="#3498db")
         self._auto_resize()
 
     def toggle_debug(self):
@@ -183,11 +200,11 @@ class TimingToolUI:
         if self.debug_expanded:
             self.debug_frame.pack(side="bottom", fill="x", padx=0, pady=(0, 0))
             if hasattr(self, 'debug_button') and self.debug_button:
-                self.debug_button.config(text="🐛 Debug ▴", bg="#2980b9")
+                self.debug_button.config(bg="#2980b9")
         else:
             self.debug_frame.pack_forget()
             if hasattr(self, 'debug_button') and self.debug_button:
-                self.debug_button.config(text="🐛 Debug", bg="#3498db")
+                self.debug_button.config(bg="#3498db")
         self._auto_resize()
 
     # ──────────────────────────────────────────────────────────────────────
@@ -197,16 +214,36 @@ class TimingToolUI:
     def on_mode_changed(self, event=None):
         """Handle mode change."""
         mode = self.mode_var.get()
+        py = int(8 * self.current_scaling)
 
-        if mode == "record":
-            self.load_ghost_button.config(state="disabled", bg="#7f8c8d", text="Load Race Ghost", command=self.load_ghost_file)
-        else:
-            self.load_ghost_button.config(state="normal", bg="#3498db", text="Load Race Ghost", command=self.load_split_file)
-        if self.configure_splits_button:
-            self.configure_splits_button.config(state="normal", bg="#8e44ad")
+        if mode == "Record Ghost":
+            # Swap slot button: show Configure Splits, hide Load Race Ghost
+            self.race_data_manager.is_split_loaded = False
+            if self.load_ghost_button:
+                self.load_ghost_button.pack_forget()
+            if self.configure_splits_button and self.save_ghost_button:
+                self.configure_splits_button.pack(fill="x", pady=(0, py),
+                                                  before=self.save_ghost_button)
+            
+        else:  # race mode
+            # Swap slot button: show Load Race Ghost, hide Configure Splits
+            self.race_data_manager.is_split_loaded = self.race_data_manager.ghost_splits is not None
+            if self.configure_splits_button:
+                self.configure_splits_button.pack_forget()
+            if self.load_ghost_button and self.save_ghost_button:
+                self.load_ghost_button.pack(fill="x", pady=(0, py),
+                                            before=self.save_ghost_button)
+            # Restore ghost name display if still showing placeholder
+            if self.ghost_filename_label:
+                try:
+                    if self.ghost_filename_label.cget("text") == "ALU Timer v5.0":
+                        self.ghost_filename_label.config(text="No ghost loaded", fg="#e74c3c")
+                except tk.TclError:
+                    pass
+
         if self.toggle_split_view_button:
             if self.race_data_manager and getattr(self.race_data_manager, 'splits', None):
-                self.toggle_split_view_button.config(state="normal", bg="#8e44ad")
+                self.toggle_split_view_button.config(state="normal", bg="#44ad4e")
             else:
                 self.toggle_split_view_button.config(state="disabled", bg="#7f8c8d")
 
@@ -315,21 +352,24 @@ class TimingToolUI:
         """Open a dialog allowing the user to configure split names and percentages."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Configure Splits")
-        dialog.geometry("400x450")
+        dialog.geometry("800x675")
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.configure(bg="#34495e")
+        dialog.configure(bg="#000000")
 
-        tk.Label(dialog, text="Number of splits (2-10):", bg="#34495e", fg="white").pack(pady=(8, 4))
+        _font = ("Helvetica", 20)
+        _font_bold = ("Helvetica", 20, "bold")
+
+        tk.Label(dialog, text="Number of splits (2-10):", bg="#000000", fg="white", font=_font).pack(pady=(16, 8))
         initial_count = 2
         if self.race_data_manager and getattr(self.race_data_manager, 'splits', None):
             initial_count = len(self.race_data_manager.splits)
         count_var = tk.IntVar(value=initial_count)
-        count_spin = tk.Spinbox(dialog, from_=2, to=10, textvariable=count_var, width=5)
-        count_spin.pack(pady=(0, 6))
+        count_spin = tk.Spinbox(dialog, from_=2, to=10, textvariable=count_var, width=5, font=_font)
+        count_spin.pack(pady=(0, 12))
 
-        rows_frame = tk.Frame(dialog, bg="#34495e")
-        rows_frame.pack(fill="both", expand=True, padx=8, pady=4)
+        rows_frame = tk.Frame(dialog, bg="#000000")
+        rows_frame.pack(fill="both", expand=True, padx=16, pady=8)
 
         entry_widgets = []
 
@@ -344,20 +384,20 @@ class TimingToolUI:
                 existing = self.race_data_manager.splits
 
             for i in range(n):
-                frame = tk.Frame(rows_frame, bg="#34495e")
-                frame.pack(fill="x", pady=2)
-                tk.Label(frame, text=f"Split {i+1} name:", bg="#34495e", fg="white").pack(side="left")
+                frame = tk.Frame(rows_frame, bg="#000000")
+                frame.pack(fill="x", pady=4)
+                tk.Label(frame, text=f"Split {i+1} name:", bg="#000000", fg="white", font=_font).pack(side="left")
                 name_var = tk.StringVar(value=(existing[i][0] if i < len(existing) else f"split_{i+1}"))
-                name_entry = tk.Entry(frame, textvariable=name_var, width=18)
-                name_entry.pack(side="left", padx=6)
-                tk.Label(frame, text="Percent:", bg="#34495e", fg="white").pack(side="left")
+                name_entry = tk.Entry(frame, textvariable=name_var, width=18, font=_font)
+                name_entry.pack(side="left", padx=12)
+                tk.Label(frame, text="Percent:", bg="#000000", fg="white", font=_font).pack(side="left")
                 if i == n - 1:
                     percent_var = tk.IntVar(value=100)
-                    tk.Label(frame, text="End", bg="#34495e", fg="#ecf0f1", width=5).pack(side="left", padx=6)
+                    tk.Label(frame, text="End", bg="#000000", fg="#ecf0f1", width=5, font=_font).pack(side="left", padx=12)
                 else:
                     default_percent = (existing[i][1] if i < len(existing) else int(((i+1)/n)*100))
                     percent_var = tk.IntVar(value=default_percent)
-                    tk.Spinbox(frame, from_=1, to=98, textvariable=percent_var, width=5).pack(side="left", padx=6)
+                    tk.Spinbox(frame, from_=1, to=98, textvariable=percent_var, width=5, font=_font).pack(side="left", padx=12)
                 entry_widgets.append((name_var, percent_var))
 
         def on_count_change(*_args):
@@ -373,8 +413,8 @@ class TimingToolUI:
         count_var.trace_add('write', lambda *_: on_count_change())
         build_rows()
 
-        btn_frame = tk.Frame(dialog, bg="#34495e")
-        btn_frame.pack(pady=8)
+        btn_frame = tk.Frame(dialog, bg="#000000")
+        btn_frame.pack(pady=16)
 
         def save_and_close():
             splits_list = []
@@ -403,7 +443,7 @@ class TimingToolUI:
                 return
 
             if self.toggle_split_view_button:
-                self.toggle_split_view_button.config(state="normal", bg="#8e44ad")
+                self.toggle_split_view_button.config(state="normal", bg="#44ad4e")
 
             # Back up existing split file before overwriting
             if (self.race_data_manager
@@ -434,8 +474,8 @@ class TimingToolUI:
 
             dialog.destroy()
 
-        tk.Button(btn_frame, text="Save", command=save_and_close, bg="#27ae60", fg="white", width=10).pack(side="left", padx=6)
-        tk.Button(btn_frame, text="Cancel", command=dialog.destroy, bg="#e74c3c", fg="white", width=10).pack(side="left", padx=6)
+        tk.Button(btn_frame, text="Save", command=save_and_close, bg="#27ae60", fg="white", width=20, font=("Helvetica", 20, "bold")).pack(side="left", padx=12)
+        tk.Button(btn_frame, text="Cancel", command=dialog.destroy, bg="#e74c3c", fg="white", width=20, font=("Helvetica", 20, "bold")).pack(side="left", padx=12)
         dialog.focus_set()
 
     def toggle_split_view(self):
@@ -443,14 +483,14 @@ class TimingToolUI:
         self.split_view_visible = not self.split_view_visible
         if self.split_view_visible:
             if not self.split_view_frame:
-                self.split_view_frame = tk.Frame(self.root, bg="#222f3e")
-            # Pack split view between main display and race panel
-            self.split_view_frame.pack(side="top", fill="x", padx=0, pady=(0, 0))
+                self.split_view_frame = tk.Frame(self.root, bg="#000000")
+            # Position split view below race panel (or at top if race panel is hidden).
+            self._repack_split_view()
             self.update_split_view()
         else:
             if self.split_view_frame:
                 self.split_view_frame.pack_forget()
-        self._adjust_height_for_split_view()
+        self._auto_resize()
 
     def _get_split_view_height(self):
         """Calculate split view height if visible."""
@@ -478,16 +518,186 @@ class TimingToolUI:
             new_height = height - split_h
         self.root.geometry(f"{width}x{max(60, new_height)}+{x}+{y}")
 
+    # ──────────────────────────────────────────────────────────────────────
+    #  Gear / RPM bar
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _create_gear_rpm_bar(self):
+        """Create the gear/RPM bar widget (packed into root, hidden by default)."""
+        bar_h = 52  # 35 * 1.5
+
+        self.gear_rpm_frame = tk.Frame(self.root, bg="#000000", height=bar_h)
+        self.gear_rpm_frame.pack_propagate(False)
+        # NOT packed — only shown when update_gear_rpm is called with racing=True
+
+        inner = tk.Frame(self.gear_rpm_frame, bg="#000000")
+        inner.pack(fill="both", expand=True, padx=(4, 4), pady=3)
+
+        self.gear_label = tk.Label(
+            inner, text="0", width=2,
+            font=("Helvetica", 40, "bold"),
+            fg="#ecf0f1", bg="#000000", anchor="center",
+        )
+        self.gear_label.pack(side="left", padx=(0, 4))
+
+        canvas_bg = "#222222"
+        canvas_frame = tk.Frame(inner, bg=canvas_bg, bd=0, highlightthickness=0)
+        canvas_frame.pack(side="left", fill="both", expand=True)
+
+        self.rpm_canvas = tk.Canvas(
+            canvas_frame, bg=canvas_bg, highlightthickness=0,
+        )
+        self.rpm_canvas.pack(fill="both", expand=True)
+        self.rpm_canvas.bind("<Configure>", lambda _e: self._draw_rpm_bar())
+
+    def _draw_rpm_bar(self):
+        """Redraw the RPM canvas bar based on current_gear / current_rpm."""
+        if not self.rpm_canvas or not self.gear_label:
+            return
+        try:
+            RPM_MIN  = 1250
+            RPM_MAX  = 8700
+
+            # Gear ratios (gear index → relative ratio; gear 5 = 1.0 reference)
+            GEAR_RATIOS = {1: 0.3, 2: 0.5, 3: 2/3, 4: 5/6, 5: 1.0}
+            DOWNSHIFT_ENGAGE = 6400  # RPM in the lower gear that triggers autoshift
+
+            g = self.current_gear
+            if g >= 2:
+                r_cur  = GEAR_RATIOS.get(g,  GEAR_RATIOS[5])
+                r_prev = GEAR_RATIOS.get(g - 1, GEAR_RATIOS[1])
+                # RPM_in_lower = RPM_current * (r_cur / r_prev)
+                # Red when RPM_in_lower < DOWNSHIFT_ENGAGE
+                # → RPM_current < DOWNSHIFT_ENGAGE * (r_prev / r_cur)
+                downshift_threshold = DOWNSHIFT_ENGAGE * (r_prev / r_cur)
+            else:
+                downshift_threshold = RPM_MIN  # gear 0/1 — never red
+
+            rpm = self.current_rpm
+            if   rpm >= 8000:
+                bar_color = "#3498db"   # blue  — near/at limiter
+            elif rpm >= 7000:
+                bar_color = "#f1c40f"   # yellow — high RPM
+            elif rpm >= downshift_threshold:
+                bar_color = "#2ecc71"   # green  — normal
+            else:
+                bar_color = "#e74c3c"   # red    — should downshift
+
+            fill_ratio = max(0.0, min(1.0, (rpm - RPM_MIN) / (RPM_MAX - RPM_MIN)))
+            gear_text = str(g) if g > 0 else "N"
+            self.gear_label.config(text=gear_text)
+
+            w = self.rpm_canvas.winfo_width()
+            h = self.rpm_canvas.winfo_height()
+            if w <= 1 or h <= 1:
+                return
+
+            self.rpm_canvas.delete("all")
+            # Dark background track
+            self.rpm_canvas.create_rectangle(0, 0, w, h, fill="#222222", outline="")
+            # Filled portion
+            fill_w = int(w * fill_ratio)
+            if fill_w > 0:
+                self.rpm_canvas.create_rectangle(0, 0, fill_w, h, fill=bar_color, outline="")
+        except tk.TclError:
+            pass
+
+    def _create_velocity_display(self):
+        """Create the velocity indicator widget (hidden by default)."""
+        self.velocity_frame = tk.Frame(self.root, bg="#000000")
+        # NOT packed — only shown when update_velocity is called with racing=True
+        self.velocity_label = tk.Label(
+            self.velocity_frame, text="0.0",
+            font=("Franklin Gothic Heavy", 105),
+            fg="#ecf0f1", bg="#000000", anchor="e",
+        )
+        self.velocity_label.pack(fill="x", padx=(4, 4), pady=0)
+
+    def update_velocity(self, speed_kmh: float, racing: bool):
+        """Show/update the velocity indicator during a race; hide it otherwise."""
+        self.current_velocity = speed_kmh
+
+        if not self.velocity_frame:
+            return
+
+        was_visible = self.velocity_visible
+        self.velocity_visible = racing
+
+        if racing:
+            try:
+                self.velocity_label.config(text=f"{speed_kmh:.1f}")
+            except tk.TclError:
+                pass
+
+        if racing and not was_visible:
+            # Pack at the very top of the window, before main_container
+            if self.main_container:
+                self.velocity_frame.pack(side="top", fill="x", before=self.main_container)
+            else:
+                self.velocity_frame.pack(side="top", fill="x")
+            self.root.update_idletasks()
+            vh = self.velocity_frame.winfo_reqheight()
+            self.velocity_height_shift = vh
+            # Move window top up so the delta panel stays at the same screen position
+            try:
+                geo = self.root.geometry()
+                parts = geo.replace('x', '+').replace('+', ' ').split()
+                if len(parts) >= 4:
+                    x, y = int(parts[2]), int(parts[3])
+                    self.root.geometry(f"+{x}+{y - vh}")
+            except (tk.TclError, ValueError):
+                pass
+            self._auto_resize()
+        elif not racing and was_visible:
+            vh = self.velocity_height_shift
+            self.velocity_frame.pack_forget()
+            # Move window down to restore original position
+            try:
+                geo = self.root.geometry()
+                parts = geo.replace('x', '+').replace('+', ' ').split()
+                if len(parts) >= 4:
+                    x, y = int(parts[2]), int(parts[3])
+                    self.root.geometry(f"+{x}+{y + vh}")
+            except (tk.TclError, ValueError):
+                pass
+            self.velocity_height_shift = 0
+            self._auto_resize()
+
+    def update_gear_rpm(self, gear: int, rpm: int, racing: bool):
+        """Show/update the gear+RPM bar during a race; hide it otherwise."""
+        self.current_gear = gear
+        self.current_rpm = rpm
+
+        if not self.gear_rpm_frame:
+            return
+
+        was_visible = self.gear_rpm_visible
+        self.gear_rpm_visible = racing
+
+        if racing and not was_visible:
+            # Place bar immediately after main_container, before race_panel
+            if self.race_panel and self.race_panel.winfo_ismapped():
+                self.gear_rpm_frame.pack(side="top", fill="x", before=self.race_panel)
+            elif self.main_container:
+                self.gear_rpm_frame.pack(side="top", fill="x", after=self.main_container)
+            else:
+                self.gear_rpm_frame.pack(side="top", fill="x")
+            self._auto_resize()
+        elif not racing and was_visible:
+            self.gear_rpm_frame.pack_forget()
+            self._auto_resize()
+
+        if racing:
+            self._draw_rpm_bar()
+
     def _format_time_ms(self, raw_us: int) -> str:
         try:
             if not raw_us or raw_us == 0:
-                return "--:--.---"
+                return "--.---"
             seconds = raw_us / 1000000.0
-            m = int(seconds // 60)
-            s = seconds - (m * 60)
-            return f"{m}:{round(s,3):06.3f}"
+            return f"{round(seconds,3):.3f}"
         except Exception:
-            return "--:--.---"
+            return "--.---"
 
     def _format_delta_ms(self, delta_us: int) -> str:
         try:
@@ -495,32 +705,51 @@ class TimingToolUI:
                 return "--.---"
             sign = '-' if delta_us <= 0 else '+'
             s = abs(delta_us) / 1000000.0
-            return f"{sign}{round(s,3):06.3f}"
+            return f"{sign}{round(s,3):.3f}"
         except Exception:
             return "--.---"
+
+    def _repack_split_view(self):
+        """Re-attach split_view_frame below the race panel (or at top if race panel is hidden)."""
+        if self.race_panel and self.race_panel.winfo_ismapped():
+            self.split_view_frame.pack(side="top", fill="x", after=self.race_panel, padx=0, pady=(0, 0))
+        else:
+            self.split_view_frame.pack(side="top", fill="x", padx=0, pady=(0, 0))
 
     def update_split_view(self):
         """Rebuild the split comparison view from current split data."""
         if not self.split_view_frame:
-            self.split_view_frame = tk.Frame(self.root, bg="#222f3e")
-
+            self.split_view_frame = tk.Frame(self.root, bg="#000000")
 
         splits, current, ghost = None, None, None
         if self.race_data_manager and hasattr(self.race_data_manager, 'get_splits'):
             splits, current, ghost = self.race_data_manager.get_splits()
 
-        has_ghost = ghost is not None
+        has_ghost = ghost is not None and self.race_data_manager.is_split_loaded
         has_live = current is not None and len(current) > 0
         is_init = current is None or len(current) == 0 or len(current) == len(splits)
 
-        if is_init: 
-            for w in self.split_view_frame.winfo_children(): 
+        # Hide frame before bulk widget creation so all updates are batched
+        # into a single render pass when the frame is re-attached.
+        was_mapped = False
+        if is_init:
+            try:
+                was_mapped = self.split_view_frame.winfo_ismapped()
+            except tk.TclError:
+                # Frame was destroyed (e.g. after a scaling rebuild); treat as unmapped.
+                self.split_view_frame = tk.Frame(self.root, bg="#000000")
+                was_mapped = False
+            if was_mapped:
+                self.split_view_frame.pack_forget()
+            for w in self.split_view_frame.winfo_children():
                 try: w.destroy()
                 except Exception: pass
             self.rows = []
 
         if not splits:
-            tk.Label(self.split_view_frame, text="No splits configured", bg="#222f3e", fg="white").pack(padx=8, pady=4)
+            tk.Label(self.split_view_frame, text="No splits configured", bg="#000000", fg="white").pack(padx=8, pady=4)
+            if is_init and was_mapped:
+                self._repack_split_view()
             return
         #try:
         #    for v in (self.race_data_manager.current_race_data.values()
@@ -542,29 +771,29 @@ class TimingToolUI:
 
                 if is_init: 
                     self.rows.append(None) # placeholder to preserve indexing for later updates
-                    self.rows[index] = tk.Frame(self.split_view_frame, bg="#222f3e")
+                    self.rows[index] = tk.Frame(self.split_view_frame, bg="#000000")
                     self.rows[index].pack(fill='x', padx=6, pady=0)
                 
-                current_time = current[index] - current[index-1] if 0 < index < len(current) else None
+                current_time = current[index] - current[index-1] if 0 < index < len(current) else current[0] if current and len(current) > 0 else None
 
                 if not has_live and not has_ghost:
-                    tk.Label(self.rows[index], text=name, bg="#222f3e", fg="white", anchor='w',
-                            width=11, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
-                    tk.Label(self.rows[index], text="", bg="#222f3e", fg="#bdc3c7",
+                    tk.Label(self.rows[index], text=name, bg="#000000", fg="white", anchor='w',
+                            width=15, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                    tk.Label(self.rows[index], text="", bg="#000000", fg="#bdc3c7",
                             width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text="0:00.000", bg="#222f3e", fg="#bdc3c7",
-                            width=8, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text="0:00.000", bg="#222f3e", fg="#bdc3c7",
-                            width=8, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text="00.000", bg="#000000", fg="#bdc3c7",
+                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text=percent, bg="#000000", fg="#bdc3c7",
+                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
                 elif not has_ghost:
-                    tk.Label(self.rows[index], text=name, bg="#222f3e", fg="white", anchor='w',
-                            width=11, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
-                    tk.Label(self.rows[index], text="=0.000", bg="#222f3e", fg="#bdc3c7",
+                    tk.Label(self.rows[index], text=name, bg="#000000", fg="white", anchor='w',
+                            width=15, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                    tk.Label(self.rows[index], text="=0.000", bg="#000000", fg="#bdc3c7",
                             width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg="#222f3e", fg="#bdc3c7",
-                            width=8, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text="−:−−.−−−", bg="#222f3e", fg="#bdc3c7",
-                            width=8, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg="#000000", fg="#bdc3c7",
+                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text=percent, bg="#000000", fg="#bdc3c7",
+                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
                 else:
                     ghost_time = ghost[index]
                     delta_display = ""
@@ -577,23 +806,26 @@ class TimingToolUI:
                     except Exception:
                         delta_display = ""
 
-                    tk.Label(self.rows[index], text=name, bg="#222f3e", fg="white", anchor='w',
-                            width=11, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                    tk.Label(self.rows[index], text=name, bg="#000000", fg="white", anchor='w',
+                            width=15, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
                     delta_fg = "#2ecc71" if delta_display and delta_display.startswith('-') else "#e74c3c"
-                    tk.Label(self.rows[index], text=delta_display, bg="#222f3e", fg=delta_fg,
+                    tk.Label(self.rows[index], text=delta_display, bg="#000000", fg=delta_fg,
                             width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg="#222f3e", fg="#bdc3c7",
-                            anchor='e', width=8, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text=self._format_time_ms(ghost_time), bg="#222f3e", fg="#bdc3c7",
-                            anchor='e', width=8, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg="#000000", fg="#bdc3c7",
+                            anchor='e', width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text=self._format_time_ms(ghost_time), bg="#000000", fg="#bdc3c7",
+                            anchor='e', width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
             index += 1
+
+        if is_init and was_mapped:
+            self._repack_split_view()
     # ──────────────────────────────────────────────────────────────────────
     #  Background color (race mode delta coloring)
     # ──────────────────────────────────────────────────────────────────────
 
     def update_background_color(self, mode: str, delta: float = None):
         """Update UI background color based on race mode and delta."""
-        if mode == "race" and delta is not None:
+        if mode == "Race vs Ghost" and delta is not None:
             if delta < 0:
                 bg_color = "#007000"  # green — ahead
             elif delta > 0:
@@ -601,7 +833,7 @@ class TimingToolUI:
             else:
                 bg_color = "#000050"  # blue — even
         else:
-            bg_color = "#2c3e50"
+            bg_color = "#000000"
 
         if bg_color != self.current_bg_color:
             self.current_bg_color = bg_color
@@ -611,8 +843,6 @@ class TimingToolUI:
                 self.delta_label.configure(bg=bg_color)
             if hasattr(self, 'button_section') and self.button_section:
                 self.button_section.configure(bg=bg_color)
-            if hasattr(self, 'race_control_indicator') and self.race_control_indicator:
-                self.race_control_indicator.configure(bg=bg_color)
 
     # ──────────────────────────────────────────────────────────────────────
     #  Dialogs
@@ -625,17 +855,17 @@ class TimingToolUI:
             dialog.title("Save Race Data")
             dialog.geometry("300x120")
             dialog.resizable(False, False)
-            dialog.configure(bg="#34495e")
+            dialog.configure(bg="#000000")
             dialog.transient(self.root)
             dialog.grab_set()
 
-            tk.Label(dialog, text="Race name:", bg="#34495e", fg="white").pack(pady=(10, 5))
+            tk.Label(dialog, text="Race name:", bg="#000000", fg="white").pack(pady=(10, 5))
             filename_var = tk.StringVar()
             entry = tk.Entry(dialog, textvariable=filename_var, width=30)
             entry.pack(pady=5)
             entry.focus_set()
 
-            button_frame = tk.Frame(dialog, bg="#34495e")
+            button_frame = tk.Frame(dialog, bg="#000000")
             button_frame.pack(pady=10)
 
             def save_and_close():
@@ -693,22 +923,31 @@ class TimingToolUI:
             if len(parts) >= 4:
                 width, height, x, y = int(parts[0]), int(parts[1]), parts[2], parts[3]
             else:
-                width, height, x, y = 300, 120, "100", "100"
+                width, height, x, y = 300, 100, "100", "100"
 
             new_width = int(width * scaling_ratio)
             new_height = int(height * scaling_ratio)
 
             was_race_expanded = self.race_panel_expanded
             was_debug_expanded = self.debug_expanded
-            current_mode = self.get_current_mode() if self.mode_var else "record"
+            current_mode = self.get_current_mode() if self.mode_var else "Record Ghost"
 
             for widget in self.root.winfo_children():
                 widget.destroy()
+            # Null out references to destroyed widgets so update_split_view
+            # doesn't try to call methods on stale Tk objects.
+            self.split_view_frame = None
+            self.rows = []
+            self.gear_rpm_frame = None
+            self.gear_rpm_visible = False
+            self.velocity_frame = None
+            self.velocity_visible = False
+            self.velocity_height_shift = 0
 
             self.root.tk.call("tk", "scaling", self.current_scaling)
 
             base_width = int(300 * self.current_scaling)
-            base_height = int(120 * self.current_scaling)
+            base_height = int(100 * self.current_scaling)
             self.root.geometry(f"{base_width}x{base_height}")
 
             self._recreate_ui_content()
@@ -766,6 +1005,16 @@ class TimingToolUI:
 
     def create_ui(self):
         """Create the main UI window."""
+        # Force DPI awareness before any window is created so Tk receives
+        # true physical pixel coordinates instead of virtualised ones.
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()   # fallback: system-DPI aware
+            except Exception:
+                pass
+
         self.root = tk.Tk()
 
         self.root.tk.call("tk", "scaling", self.current_scaling)
@@ -781,7 +1030,7 @@ class TimingToolUI:
 
         # Window geometry from config (force base height; panels restored separately)
         geometry = self.config_manager.get_window_geometry_from_config(self.ui_config)
-        base_h = int(120 * self.current_scaling)
+        base_h = int(100 * self.current_scaling)
         gparts = geometry.replace('x', '+').replace('+', ' ').split()
         self.root.geometry(f"{gparts[0]}x{base_h}+{gparts[2]}+{gparts[3]}")
         self.root.overrideredirect(True)
@@ -793,26 +1042,27 @@ class TimingToolUI:
         self.taskbar_window.withdraw()
         self.taskbar_window.iconify()
 
-        self.root.configure(bg="#2c3e50")
+        self.root.configure(bg="#000000")
 
         # Pin state
         self.is_pinned = self.ui_config.get("is_pinned", True)
         self.root.wm_attributes("-topmost", True)
 
         # ── Main container (fixed height — does not grow with panels) ──
-        main_container = tk.Frame(self.root, bg="#2c3e50", height=base_h)
+        main_container = tk.Frame(self.root, bg="#000000", height=base_h)
         main_container.pack(side="top", fill="x")
         main_container.pack_propagate(False)
+        self.main_container = main_container
 
         # Main UI frame (delta display + button bar)
-        main_ui_frame = tk.Frame(main_container, bg="#2c3e50")
+        main_ui_frame = tk.Frame(main_container, bg="#000000")
         main_ui_frame.pack(side="left", fill="both", expand=True)
 
         main_ui_frame.bind("<Button-1>", self.start_drag)
         main_ui_frame.bind("<B1-Motion>", self.on_drag)
 
         # Delta display area
-        self.main_display_frame = tk.Frame(main_ui_frame, bg="#2c3e50")
+        self.main_display_frame = tk.Frame(main_ui_frame, bg="#000000")
         self.main_display_frame.pack(fill="both", expand=True)
         self.main_display_frame.bind("<Button-1>", self.start_drag)
         self.main_display_frame.bind("<B1-Motion>", self.on_drag)
@@ -820,7 +1070,7 @@ class TimingToolUI:
         self.delta_label = tk.Label(
             self.main_display_frame, text=self.delta_time,
             font=("Helvetica", self.DELTA_FONT_BASE, "bold"),
-            fg="#ecf0f1", bg="#2c3e50",
+            fg="#ecf0f1", bg="#000000",
         )
         self.delta_label.pack(expand=True, fill="both")
         self.delta_label.bind("<Button-1>", self.start_drag)
@@ -831,52 +1081,74 @@ class TimingToolUI:
         self.delta_label.bind('<Button-3>', self.toggle_race_panel)
 
         # ── Bottom button section (30 px bar) ──
-        button_section = tk.Frame(main_ui_frame, bg="#2c3e50", height=30)
-        button_section.pack(fill="x", side="bottom")
+        btn_px = int(14 * self.current_scaling)
+        button_section = tk.Frame(main_ui_frame, bg="#000000", height=30)
+        button_section.pack(fill="x", side="bottom", padx=(btn_px, btn_px), pady=0)
         button_section.pack_propagate(False)
+        button_section.grid_propagate(False)
+        # 2-column grid mirroring the race panel's uniform split so the
+        # button cluster's left edge aligns with the right column's left edge.
+        button_section.columnconfigure(0, weight=1, uniform="bcol")
+        button_section.columnconfigure(1, weight=1, uniform="bcol")
         self.button_section = button_section
 
         button_section.bind("<Button-1>", self.start_drag)
         button_section.bind("<B1-Motion>", self.on_drag)
 
-        # Race Control indicator (left, hidden until panel opens)
+        # Left col: Race Control indicator (always visible)
         self.race_control_indicator = tk.Label(
-            button_section, text="Race Control",
-            font=("Helvetica", 10, "bold"), fg="white", bg="#2c3e50",
+            button_section, text="ALU Timer v5.0",
+            font=("Helvetica", 18, "bold"), fg="white", bg="#000000", anchor='w'
         )
+        self.race_control_indicator.grid(row=0, column=0, sticky="w", padx=0, pady=0)
 
-        # Close button (rightmost)
+        # Right col: 4-button cluster — fills column so left edge aligns with
+        # the race panel's right column left edge.
+        btns_frame = tk.Frame(button_section, bg="#000000")
+        btns_frame.grid(row=0, column=1, sticky="ew")
+
         self.close_button = tk.Button(
-            button_section, text="✕", command=self.close_app,
+            btns_frame, text="✕", command=self.close_app,
             bg="#e74c3c", fg="white", font=("Helvetica", 11, "bold"),
             relief="flat", width=3, height=0, pady=0,
         )
         self.close_button.pack(side="right", padx=2, pady=2)
 
-        # Pin button
         pin_text = "●" if self.is_pinned else "○"
         pin_bg = "#95a5a6" if self.is_pinned else "#4ecdc4"
         self.pin_button = tk.Button(
-            button_section, text=pin_text, command=self.toggle_pin,
+            btns_frame, text=pin_text, command=self.toggle_pin,
             bg=pin_bg, fg="white", font=("Helvetica", 11, "bold"),
             relief="flat", width=3, height=0, pady=0,
         )
         self.pin_button.pack(side="right", padx=2, pady=2)
 
-        # Race panel toggle button
+        self.debug_button = tk.Button(
+            btns_frame, text="🐛", command=self.toggle_debug,
+            bg="#3498db", fg="white", font=("Helvetica", 11, "bold"),
+            relief="flat", width=3, height=0, pady=0,
+        )
+        self.debug_button.pack(side="right", padx=2, pady=2)
+
         self.race_button = tk.Button(
-            button_section, text="▾", command=self.toggle_race_panel,
+            btns_frame, text="▾", command=self.toggle_race_panel,
             bg="#e67e22", fg="white", font=("Helvetica", 11, "bold"),
             relief="flat", width=3, height=0, pady=0,
         )
         self.race_button.pack(side="right", padx=2, pady=2)
 
         # ── Race panel (hidden, packed below when toggled) ──
-        self.race_panel = tk.Frame(self.root, bg="#2c3e50", height=150)
+        self.race_panel = tk.Frame(self.root, bg="#000000", height=150)
         self._create_race_panel_content()
 
+        # ── Gear / RPM bar (hidden until a race starts) ──
+        self._create_gear_rpm_bar()
+
+        # ── Velocity indicator (hidden until a race starts) ──
+        self._create_velocity_display()
+
         # Restore saved panel states
-        self._restore_panel_states_from_config()
+        self.toggle_race_panel()
 
         # Start UI update loop
         self.update_ui()
@@ -891,7 +1163,7 @@ class TimingToolUI:
         self.debug_expanded = False
 
         base_width = int(300 * self.current_scaling)
-        base_height = int(120 * self.current_scaling)
+        base_height = int(100 * self.current_scaling)
         self.root.geometry(f"{base_width}x{base_height}")
         self.root.overrideredirect(True)
 
@@ -902,20 +1174,21 @@ class TimingToolUI:
         self.taskbar_window.withdraw()
         self.taskbar_window.iconify()
 
-        self.root.configure(bg="#2c3e50")
+        self.root.configure(bg="#000000")
         self.root.wm_attributes("-topmost", True)
 
         # Main container (fixed height — does not grow with panels)
-        main_container = tk.Frame(self.root, bg="#2c3e50", height=base_height)
+        main_container = tk.Frame(self.root, bg="#000000", height=base_height)
         main_container.pack(side="top", fill="x")
         main_container.pack_propagate(False)
+        self.main_container = main_container
 
-        main_ui_frame = tk.Frame(main_container, bg="#2c3e50")
+        main_ui_frame = tk.Frame(main_container, bg="#000000")
         main_ui_frame.pack(side="left", fill="both", expand=True)
         main_ui_frame.bind("<Button-1>", self.start_drag)
         main_ui_frame.bind("<B1-Motion>", self.on_drag)
 
-        self.main_display_frame = tk.Frame(main_ui_frame, bg="#2c3e50")
+        self.main_display_frame = tk.Frame(main_ui_frame, bg="#000000")
         self.main_display_frame.pack(fill="both", expand=True)
         self.main_display_frame.bind("<Button-1>", self.start_drag)
         self.main_display_frame.bind("<B1-Motion>", self.on_drag)
@@ -923,7 +1196,7 @@ class TimingToolUI:
         self.delta_label = tk.Label(
             self.main_display_frame, text=self.delta_time,
             font=("Helvetica", self.DELTA_FONT_BASE, "bold"),
-            fg="#ecf0f1", bg="#2c3e50",
+            fg="#ecf0f1", bg="#000000",
         )
         self.delta_label.pack(expand=True, fill="both")
         self.delta_label.bind("<Button-1>", self.start_drag)
@@ -932,20 +1205,28 @@ class TimingToolUI:
         self.delta_label.bind('<Button-3>', self.toggle_race_panel)
 
         # Button section
-        button_section = tk.Frame(main_ui_frame, bg="#2c3e50", height=30)
-        button_section.pack(fill="x", side="bottom")
+        btn_px = int(14 * self.current_scaling)
+        button_section = tk.Frame(main_ui_frame, bg="#000000", height=30)
+        button_section.pack(fill="x", side="bottom", padx=(btn_px, btn_px), pady=0)
         button_section.pack_propagate(False)
+        button_section.grid_propagate(False)
+        button_section.columnconfigure(0, weight=1, uniform="bcol")
+        button_section.columnconfigure(1, weight=1, uniform="bcol")
         self.button_section = button_section
         button_section.bind("<Button-1>", self.start_drag)
         button_section.bind("<B1-Motion>", self.on_drag)
 
         self.race_control_indicator = tk.Label(
-            button_section, text="Race Control",
-            font=("Helvetica", 10, "bold"), fg="white", bg="#2c3e50",
+            button_section, text="ALU Timer v5.0",
+            font=("Helvetica", 18, "bold"), fg="white", bg="#000000", anchor='w'
         )
+        self.race_control_indicator.grid(row=0, column=0, sticky="w", padx=0, pady=0)
+
+        btns_frame = tk.Frame(button_section, bg="#000000")
+        btns_frame.grid(row=0, column=1, sticky="ew")
 
         self.close_button = tk.Button(
-            button_section, text="✕", command=self.close_app,
+            btns_frame, text="✕", command=self.close_app,
             bg="#e74c3c", fg="white", font=("Helvetica", 11, "bold"),
             relief="flat", width=3, height=0, pady=0,
         )
@@ -954,21 +1235,39 @@ class TimingToolUI:
         pin_text = "●" if self.is_pinned else "○"
         pin_bg = "#4ecdc4" if self.is_pinned else "#95a5a6"
         self.pin_button = tk.Button(
-            button_section, text=pin_text, command=self.toggle_pin,
+            btns_frame, text=pin_text, command=self.toggle_pin,
             bg=pin_bg, fg="white", font=("Helvetica", 11, "bold"),
             relief="flat", width=3, height=0, pady=0,
         )
         self.pin_button.pack(side="right", padx=2, pady=2)
 
+        self.debug_button = tk.Button(
+            btns_frame, text="🐛", command=self.toggle_debug,
+            bg="#3498db", fg="white", font=("Helvetica", 11, "bold"),
+            relief="flat", width=3, height=0, pady=0,
+        )
+        self.debug_button.pack(side="right", padx=2, pady=2)
+
         self.race_button = tk.Button(
-            button_section, text="▾", command=self.toggle_race_panel,
+            btns_frame, text="▾", command=self.toggle_race_panel,
             bg="#e67e22", fg="white", font=("Helvetica", 11, "bold"),
             relief="flat", width=3, height=0, pady=0,
         )
         self.race_button.pack(side="right", padx=2, pady=2)
 
-        self.race_panel = tk.Frame(self.root, bg="#2c3e50", height=150)
+        self.race_panel = tk.Frame(self.root, bg="#000000", height=150)
         self._create_race_panel_content()
+
+        # Gear / RPM bar
+        self.gear_rpm_frame = None
+        self.gear_rpm_visible = False
+        self._create_gear_rpm_bar()
+
+        # Velocity indicator
+        self.velocity_frame = None
+        self.velocity_visible = False
+        self.velocity_height_shift = 0
+        self._create_velocity_display()
 
         # Rebind shortcuts
         self.root.bind_all("<Control-plus>", lambda e: self.increase_scaling())
@@ -982,109 +1281,145 @@ class TimingToolUI:
     # ──────────────────────────────────────────────────────────────────────
 
     def _create_race_panel_content(self):
-        """Create the race panel content with 2-column layout (old UI design)."""
+        """Create the race panel content with 2-column layout."""
         if not self.race_panel:
             return
 
-        # Main 2-column container
-        main_container = tk.Frame(self.race_panel, bg="#2c3e50")
-        main_container.pack(fill="both", expand=True, padx=15, pady=15)
+        # Scaled padding — multiplied by current_scaling so they grow/shrink
+        # proportionally when adjust_scaling rebuilds the panel.
+        px = int(14 * self.current_scaling)
+        py = int(10 * self.current_scaling)
+        py_sm = int(6 * self.current_scaling)
 
-        # ── Left column: Ghost info + Mode selector ──
-        left_column = tk.Frame(main_container, bg="#2c3e50")
-        left_column.pack(side="left", fill="both", expand=True, padx=(0, 15))
+        # Apply a ttk Style so the Combobox matches the UI theme.
+        # 'clam' theme is required on Windows — the default 'vista'/'winnative'
+        # theme ignores fieldbackground, arrowcolor, and font overrides entirely.
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("Race.TCombobox",
+                        font=("Helvetica", 15, "bold"),
+                        foreground="#ecf0f1",
+                        background="#34495e",
+                        fieldbackground="#34495e",
+                        selectbackground="#34495e",
+                        selectforeground="#ecf0f1",
+                        arrowcolor="#ecf0f1",
+                        borderwidth=0,
+                        relief="flat",
+                        padding=(int(4 * self.current_scaling), int(4 * self.current_scaling)))
+        style.map("Race.TCombobox",
+                  fieldbackground=[("readonly", "#34495e"), ("disabled", "#2c3e50")],
+                  foreground=[("readonly", "#ecf0f1")],
+                  background=[("active", "#4a6785"), ("!active", "#34495e")])
+        # Dropdown popup listbox — styled via tk option database (not ttk)
+        self.root.option_add('*TCombobox*Listbox.font', ("Helvetica", 15, "bold"))
+        self.root.option_add('*TCombobox*Listbox.background', "#34495e")
+        self.root.option_add('*TCombobox*Listbox.foreground', "#ecf0f1")
+        self.root.option_add('*TCombobox*Listbox.selectBackground', "#202d3a")
+        self.root.option_add('*TCombobox*Listbox.selectForeground', "#ecf0f1")
+        self.root.option_add('*TCombobox*Listbox.relief', "flat")
+
+        # Main 2-column container — grid with uniform weights keeps both
+        # columns exactly equal width regardless of button text length.
+        main_container = tk.Frame(self.race_panel, bg="#000000")
+        main_container.pack(fill="both", expand=True, padx=px, pady=py)
+        main_container.columnconfigure(0, weight=1, uniform="col")
+        main_container.columnconfigure(1, weight=1, uniform="col")
+        main_container.rowconfigure(0, weight=1)
+
+        # ── Left column: Ghost info + Mode selector + Debug button ──
+        left_column = tk.Frame(main_container, bg="#000000")
+        left_column.grid(row=0, column=0, sticky="nsew", padx=(0, px // 2))
 
         # Ghost section
-        ghost_frame = tk.Frame(left_column, bg="#2c3e50")
-        ghost_frame.pack(fill="x", pady=(0, 15))
+        ghost_frame = tk.Frame(left_column, bg="#000000")
+        ghost_frame.pack(fill="x", pady=(0, py_sm))
 
-        tk.Label(ghost_frame, text="Ghost Name:",
-                 font=("Helvetica", 10, "bold"), fg="#bdc3c7", bg="#2c3e50").pack(anchor="w")
+        #tk.Label(ghost_frame, text="Ghost Name:",
+        #         font=("Helvetica", 12, "bold"), fg="#bdc3c7", bg="#000000").pack(anchor="w")
         self.ghost_filename_label = tk.Label(
-            ghost_frame, text="No ghost loaded",
-            font=("Helvetica", 9), fg="#e74c3c", bg="#2c3e50",
-            wraplength=200, justify="left",
+            ghost_frame, text="By Orange & Bholla64",
+            font=("Helvetica", 12,'bold'), fg="#b4c6c8", bg="#000000",
+            wraplength=200, justify="left"
         )
-        self.ghost_filename_label.pack(anchor="w", pady=(2, 0))
+        self.ghost_filename_label.pack(anchor="w", pady=(0, 0))
 
         # Mode section
-        mode_frame = tk.Frame(left_column, bg="#2c3e50")
-        mode_frame.pack(fill="x", pady=(0, 5))
+        mode_frame = tk.Frame(left_column, bg="#000000")
+        mode_frame.pack(fill="x", pady=(0, py))
 
-        tk.Label(mode_frame, text="Mode:",
-                 font=("Helvetica", 10, "bold"), fg="#bdc3c7", bg="#2c3e50").pack(anchor="w")
-        self.mode_var = tk.StringVar(value="record")
+        #tk.Label(mode_frame, text="Mode:",
+        #         font=("Helvetica", 12, "bold"), fg="#bdc3c7", bg="#000000").pack(anchor="w")
+        self.mode_var = tk.StringVar(value="Record Ghost")
         self.mode_combobox = ttk.Combobox(
             mode_frame, textvariable=self.mode_var,
-            values=["record", "race", "splits"],
-        #    values=["record", "race"],
-            state="readonly", width=18,
+            values=["Record Ghost", "Race vs Ghost"],
+            state="readonly", width=14,
+            style="Race.TCombobox",
+            font=("Helvetica", 15, "bold"),
         )
-        self.mode_combobox.pack(anchor="w", pady=(2, 0))
+        self.mode_combobox.pack(anchor="w", fill="x", pady=(round(0.7353 * self.current_scaling), 0))
         self.mode_combobox.bind('<<ComboboxSelected>>', self.on_mode_changed)
 
-        # Debug button (below mode selector)
-        self.debug_button = tk.Button(
-            left_column, text="🐛 Debug", command=self.toggle_debug,
-            bg="#3498db", fg="white", font=("Helvetica", 9),
-            relief="flat", anchor="w",
-        )
-        self.debug_button.pack(anchor="w", pady=(10, 0))
-
-        # ── Right column: Action buttons ──
-        right_column = tk.Frame(main_container, bg="#2c3e50")
-        right_column.pack(side="right", fill="both", expand=True)
-
-        # Load ghost
-        self.load_ghost_button = tk.Button(
-            right_column, text="Load Race Ghost", command=self.load_ghost_file,
-            bg="#7f8c8d", fg="white", font=("Helvetica", 9),
-            relief="flat", width=18, state="disabled",
-        )
-        self.load_ghost_button.pack(pady=(0, 10))
-
-        # Save ghost
-        self.save_ghost_button = tk.Button(
-            right_column, text="Save Current Ghost", command=self.save_ghost_file,
-            bg="#7f8c8d", fg="white", font=("Helvetica", 9),
-            relief="flat", width=18, state="disabled",
-        )
-        self.save_ghost_button.pack(pady=(0, 10))
-
-        # Configure splits button (disabled unless splits mode)
-        self.configure_splits_button = tk.Button(
-            right_column, text="Configure Splits", command=self.open_configure_splits_dialog,
-            bg="#8e44ad", fg="white", font=("Helvetica", 9),
-            relief="flat", width=18, state="normal",
-        )
-        self.configure_splits_button.pack(pady=(0, 5))
-
-        # Toggle split view button (disabled unless splits configured)
+        # Split View — fills width of left column
         self.toggle_split_view_button = tk.Button(
-            right_column, text="Split View", command=self.toggle_split_view,
-            bg="#7f8c8d", fg="white", font=("Helvetica", 9),
-            relief="flat", width=18, state="disabled",
+            left_column, text="Toggle Split View", command=self.toggle_split_view,
+            bg="#7f8c8d", fg="white", font=("Helvetica", 12, "bold"),
+            relief="flat", state="disabled",
         )
-        self.toggle_split_view_button.pack(pady=(0, 10))
+        self.toggle_split_view_button.pack(fill="x", pady=(0, 0))
+
+        # ── Right column: slot button + Save + Split View ──
+        right_column = tk.Frame(main_container, bg="#000000")
+        right_column.grid(row=0, column=1, sticky="nsew", padx=(px // 2, 0),pady=(round(2*self.current_scaling),0))
+
+        # Slot 1 — Configure Splits (record mode, packed by default)
+        # Load Race Ghost is created here but NOT packed — swapped in on_mode_changed
+        self.configure_splits_button = tk.Button(
+            right_column, text="Split Config",
+            command=self.open_configure_splits_dialog,
+            bg="#8e44ad", fg="white", font=("Helvetica", 18, "bold"),
+            relief="flat",
+        )
+        self.configure_splits_button.pack(fill="x", pady=(0, py))
+
+        self.load_ghost_button = tk.Button(
+            right_column, text="Load Ghost", command=self.load_split_file,
+            bg="#3498db", fg="white", font=("Helvetica", 18, "bold"),
+            relief="flat",
+        )
+        # NOT packed here — only shown when mode == "Race vs Ghost"
+
+        # Slot 2 — Save Ghost (always present, enabled when data exists)
+        self.save_ghost_button = tk.Button(
+            right_column, text="Save Ghost", command=self.save_ghost_file,
+            bg="#7f8c8d", fg="white", font=("Helvetica", 18, "bold"),
+            relief="flat", state="disabled",
+        )
+        self.save_ghost_button.pack(fill="x", pady=(0, 0))
 
         # ── Debug panel (hidden, packed below when expanded) ──
-        self.debug_frame = tk.Frame(self.race_panel, bg="#2c3e50")
+        self.debug_frame = tk.Frame(self.race_panel, bg="#000000")
         self._create_debug_panel_content()
 
     def _create_debug_panel_content(self):
-        """Create the debug panel content with 2-column layout (old UI design)."""
+        """Create the debug panel content with 2-column layout."""
         if not self.debug_frame:
             return
 
-        main_container = tk.Frame(self.debug_frame, bg="#2c3e50")
-        main_container.pack(fill="both", expand=True, padx=5, pady=3)
+        px = int(8 * self.current_scaling)
+        py = int(5 * self.current_scaling)
+        py_sm = int(3 * self.current_scaling)
+
+        main_container = tk.Frame(self.debug_frame, bg="#000000")
+        main_container.pack(fill="both", expand=True, padx=px, pady=py)
 
         # Title row
-        title_row = tk.Frame(main_container, bg="#2c3e50")
-        title_row.pack(fill="x", pady=(0, 3))
+        title_row = tk.Frame(main_container, bg="#000000")
+        title_row.pack(fill="x", pady=(0, py_sm))
 
         tk.Label(title_row, text="Debug Information",
-                 font=("Helvetica", 11, "bold"), fg="#ecf0f1", bg="#2c3e50").pack(side="left", anchor="w")
+                 font=("Helvetica", 12, "bold"), fg="#ecf0f1", bg="#000000").pack(side="left", anchor="w")
 
         self.debug_close_button = tk.Button(
             title_row, text="✕", font=("Helvetica", 11, "bold"),
@@ -1094,49 +1429,49 @@ class TimingToolUI:
         self.debug_close_button.pack(side="right")
 
         # 2-column info
-        info_container = tk.Frame(main_container, bg="#2c3e50")
+        info_container = tk.Frame(main_container, bg="#000000")
         info_container.pack(fill="both", expand=True)
 
         # Left: Performance metrics
-        left_column = tk.Frame(info_container, bg="#2c3e50")
-        left_column.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        left_column = tk.Frame(info_container, bg="#000000")
+        left_column.pack(side="left", fill="both", expand=True, padx=(0, px))
 
         tk.Label(left_column, text="Performance Metrics",
-                 font=("Helvetica", 10, "bold"), fg="#bdc3c7", bg="#2c3e50").pack(anchor="w", pady=(0, 3))
+                 font=("Helvetica", 11, "bold"), fg="#bdc3c7", bg="#000000").pack(anchor="w", pady=(0, py_sm))
 
         self.elapsed_label = tk.Label(left_column, text=f"Loop: {self.elapsed_ms:.1f}ms",
-                                      font=("Helvetica", 9), fg="#ecf0f1", bg="#2c3e50")
+                                      font=("Helvetica", 10), fg="#ecf0f1", bg="#000000")
         self.elapsed_label.pack(anchor="w")
 
         self.avg_loop_label = tk.Label(left_column, text="Avg Loop: --",
-                                       font=("Helvetica", 9), fg="#ecf0f1", bg="#2c3e50")
+                                       font=("Helvetica", 10), fg="#ecf0f1", bg="#000000")
         self.avg_loop_label.pack(anchor="w")
 
         self.inference_label = tk.Label(left_column, text="Inference: --",
-                                        font=("Helvetica", 9), fg="#ecf0f1", bg="#2c3e50")
+                                        font=("Helvetica", 10), fg="#ecf0f1", bg="#000000")
         self.inference_label.pack(anchor="w")
 
         self.avg_inference_label = tk.Label(left_column, text="Avg Inference: --",
-                                            font=("Helvetica", 9), fg="#ecf0f1", bg="#2c3e50")
+                                            font=("Helvetica", 10), fg="#ecf0f1", bg="#000000")
         self.avg_inference_label.pack(anchor="w")
 
         # Right: Game state
-        right_column = tk.Frame(info_container, bg="#2c3e50")
+        right_column = tk.Frame(info_container, bg="#000000")
         right_column.pack(side="right", fill="both", expand=True)
 
         tk.Label(right_column, text="Game State",
-                 font=("Helvetica", 10, "bold"), fg="#bdc3c7", bg="#2c3e50").pack(anchor="w", pady=(0, 3))
+                 font=("Helvetica", 11, "bold"), fg="#bdc3c7", bg="#000000").pack(anchor="w", pady=(0, py_sm))
 
         self.time_label = tk.Label(right_column, text=f"Timer: {self.current_timer_display}",
-                                    font=("Helvetica", 9), fg="#ecf0f1", bg="#2c3e50")
+                                    font=("Helvetica", 10), fg="#ecf0f1", bg="#000000")
         self.time_label.pack(anchor="w")
 
         self.percentage_label = tk.Label(right_column, text="Distance: --",
-                                          font=("Helvetica", 9, "bold"), fg="#95a5a6", bg="#2c3e50")
+                                          font=("Helvetica", 10, "bold"), fg="#95a5a6", bg="#000000")
         self.percentage_label.pack(anchor="w")
 
         self.debug_timer_label = tk.Label(right_column, text="Timer: 00:00.000",
-                                           font=("Courier", 9), fg="#95a5a6", bg="#2c3e50")
+                                           font=("Courier", 10), fg="#95a5a6", bg="#000000")
         self.debug_timer_label.pack(anchor="w")
 
     def _restore_panel_states_from_config(self):
@@ -1163,7 +1498,7 @@ class TimingToolUI:
 
         try:
             current_mode = self.get_current_mode()
-            if current_mode == "race" or current_mode == "splits":
+            if current_mode == "Race vs Ghost":
                 if self.delta_time and self.delta_time != "−−.−−−":
                     self.delta_label.config(text=self.delta_time, font=("Franklin Gothic Heavy", 90))
                 elif self.current_timer_display == "00:00.000":
@@ -1175,7 +1510,7 @@ class TimingToolUI:
                 if self.current_timer_display and self.current_timer_display != "00:00.000":
                     self.delta_label.config(text=self.current_timer_display, font=("Helvetica", 65))
                 else:
-                    self.delta_label.config(text="Record Mode", font=("Helvetica", 50))
+                    self.delta_label.config(text="Record Mode", font=("Helvetica", 45))
 
             # Debug info (only when expanded)
             if self.debug_expanded:
@@ -1242,7 +1577,7 @@ class TimingToolUI:
     def get_current_mode(self) -> str:
         if self.mode_var:
             return self.mode_var.get()
-        return "record"
+        return "Record Ghost"
 
     def show_message(self, title: str, message: str, is_error: bool = False):
         if is_error:
