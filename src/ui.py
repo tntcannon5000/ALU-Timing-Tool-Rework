@@ -1507,11 +1507,11 @@ class TimingToolUI:
         if not self.split_view_frame:
             self.split_view_frame = tk.Frame(self.root, bg="#000000")
 
-        splits, current, ghost = None, None, None
+        splits, current, best, ghost = None, None, None, None
         if self.race_data_manager and hasattr(self.race_data_manager, 'get_splits'):
-            splits, current, ghost = self.race_data_manager.get_splits()
+            splits, current, best, ghost = self.race_data_manager.get_splits()
 
-        has_ghost = ghost is not None and self.race_data_manager.is_split_loaded
+        has_ghost = ghost is not None and best is not None and self.race_data_manager.is_split_loaded
         has_live = current is not None and len(current) > 0
 
         # Check whether existing row frames are still valid Tk widgets.
@@ -1550,7 +1550,7 @@ class TimingToolUI:
                 self._repack_split_view()
             return
 
-        font_size = 21
+        font_size = 18
         index = 0
         for s_item in splits:
             row_bg = "#1a1a1a" if index % 2 == 0 else "#000000"
@@ -1568,24 +1568,29 @@ class TimingToolUI:
 
                 if not has_live and not has_ghost:
                     tk.Label(self.rows[index], text=name, bg=row_bg, fg="white", anchor='w',
-                            width=15, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                            width=12, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
                     tk.Label(self.rows[index], text="", bg=row_bg, fg="#bdc3c7",
                             width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text="00.000", bg=row_bg, fg="#bdc3c7",
+                    tk.Label(self.rows[index], text="", bg=row_bg, fg="#bdc3c7",
                             width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text=percent, bg=row_bg, fg="#bdc3c7",
+                    tk.Label(self.rows[index], text="", bg=row_bg, fg="#bdc3c7",
                             width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text=percent, bg=row_bg, fg="#bdc3c7",
+                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=4, sticky='e',pady=0)
                 elif not has_ghost:
                     tk.Label(self.rows[index], text=name, bg=row_bg, fg="white", anchor='w',
-                            width=15, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
-                    tk.Label(self.rows[index], text="=0.000", bg=row_bg, fg="#bdc3c7",
+                            width=12, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                    tk.Label(self.rows[index], text="", bg=row_bg, fg="#bdc3c7",
                             width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg=row_bg, fg="#bdc3c7",
+                    tk.Label(self.rows[index], text="", bg=row_bg, fg="#bdc3c7",
                             width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text=percent, bg=row_bg, fg="#bdc3c7",
+                    tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg=row_bg, fg="#bdc3c7",
                             width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text=percent, bg=row_bg, fg="#bdc3c7",
+                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=4, sticky='e',pady=0)
                 else:
                     ghost_time = ghost[index]
+                    best_time = best[index]
                     delta_display = ""
                     if current_time is None and index == 0:
                         current_time = current[0] if current and len(current) > 0 else None
@@ -1595,16 +1600,19 @@ class TimingToolUI:
                             delta_display = self._format_delta_ms(delta_us)
                     except Exception:
                         delta_display = ""
-
-                    tk.Label(self.rows[index], text=name, bg=row_bg, fg="white", anchor='w',
-                            width=15, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
-                    delta_fg = "#2ecc71" if delta_display and delta_display.startswith('-') else "#e74c3c"
+                    delta_us = current_time - ghost_time if current_time and ghost_time else 1
+                    fg_color = "#C2AC09" if delta_us < 0 else "white"
+                    tk.Label(self.rows[index], text=name, bg=row_bg, fg=fg_color, anchor='w',
+                            width=12, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                    delta_fg = fg_color if fg_color != "white" else "#2ecc71" if delta_display and delta_display.startswith('-') else "#e74c3c"
                     tk.Label(self.rows[index], text=delta_display, bg=row_bg, fg=delta_fg,
                             width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg=row_bg, fg="#bdc3c7",
+                    tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg=row_bg, fg=fg_color if fg_color != "white" else "#bdc3c7",
                             anchor='e', width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
-                    tk.Label(self.rows[index], text=self._format_time_ms(ghost_time), bg=row_bg, fg="#bdc3c7",
+                    tk.Label(self.rows[index], text=self._format_time_ms(ghost_time), bg=row_bg, fg=fg_color if fg_color != "white" else "#bdc3c7",
                             anchor='e', width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+                    tk.Label(self.rows[index], text=self._format_time_ms(best_time), bg=row_bg, fg=fg_color if fg_color != "white" else "#bdc3c7",
+                            anchor='e', width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=4, sticky='e',pady=0)
             index += 1
 
         if is_init and was_mapped:

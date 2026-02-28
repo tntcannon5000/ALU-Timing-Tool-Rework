@@ -29,7 +29,8 @@ class RaceDataManager:
         self.split_velocities: Optional[list] = None  # parallel to split_progress, may contain NaN
         # Split-file related data
         self.current_splits: Optional[list] = None # contains the RAW time values at which each of the current splits are recorded
-        self.ghost_splits: Optional[list] = None # contains the DURATION of the split in the loaded ghost
+        self.best_splits: Optional[list] = None # contains the DURATION of the best splits in the loaded ghost
+        self.ghost_splits: Optional[list] = None # contains the DURATION of the splits in the loaded ghost
         self.splits: Optional[list] = None  # list of [string name, float progress] lists
         self.split_progress: Optional[np.ndarray] = None
         self.split_times: Optional[np.ndarray] = None
@@ -95,7 +96,7 @@ class RaceDataManager:
             self.current_time_data = np.append(self.current_time_data, time_us)
             self.current_velocity_data = np.append(self.current_velocity_data, velocity)
         print(f"Recorded final time at 100%: {time_us}us")
-        self.ghost_splits = self.get_ghost_splits()
+        self.best_splits = self.get_ghost_splits()
         self.new_split_available = True
         self.no_new_data = False
     
@@ -214,9 +215,10 @@ class RaceDataManager:
                 self.split_velocities = None
             self.splits = data['splits'] if 'splits' in data else None
             self.is_split_loaded = self.split_progress is not None and self.split_times is not None
-            self.ghost_splits =  self.get_ghost_splits()
+            self.best_splits =  self.get_ghost_splits()
+            self.ghost_splits = self.get_ghost_splits(False)
             self.ghost_filename = filepath
-            if self.ghost_splits is not None:
+            if self.best_splits is not None:
                 self.new_split_available = True
             return True
             
@@ -224,20 +226,22 @@ class RaceDataManager:
             print(f"Error loading ghost data: {e}")
             return False
     
-    def get_ghost_splits(self) -> Optional[list]:
+    def get_ghost_splits(self, best: bool = True) -> Optional[list]:
         """
         Return the list of ghost splits for this race.
         """
+        times = self.split_times if best else self.ghost_time_data
+        progress = self.split_progress if best else self.ghost_progress_data
         try:
             ghost_split_times = []
-            ghost_split_times.append(int(self.split_times[self.split_progress == self.splits[0][1]][0]))
+            ghost_split_times.append(int(times[progress == self.splits[0][1]][0]))
             print(self.splits)
             print("First ghost split time:", ghost_split_times[0])
             for i in range(len(self.splits)-1):
                 prev = self.splits[i]
                 current = self.splits[i+1]
-                timestart = int(self.split_times[self.split_progress == prev[1]][0])
-                timeend = int(self.split_times[self.split_progress == current[1]][0])
+                timestart = int(times[progress == prev[1]][0])
+                timeend = int(times[progress == current[1]][0])
                 ghost_split_times.append(timeend - timestart)
             print("Calculated ghost splits:", ghost_split_times)
             return ghost_split_times
@@ -292,7 +296,7 @@ class RaceDataManager:
         self.split_progress = np.concatenate((prog_beginning, prog_middle, prog_end))
         self.split_velocities = list(vels_beginning) + list(vels_middle) + list(vels_end)
         self.save_split_data()
-        self.ghost_splits = self.get_ghost_splits()
+        self.best_splits = self.get_ghost_splits()
 
     def handle_split_reached(self, progress: float, time_us: int, velocity: float = 0.0):
         """
@@ -319,7 +323,7 @@ class RaceDataManager:
         except: total_time = time_at_new_split
         self.current_splits.append(time_at_new_split)
         if self.is_split_loaded:
-            if total_time < self.ghost_splits[self.next_split_index]:
+            if total_time < self.best_splits[self.next_split_index]:
                 self.save_current_split()
         self.new_split_available = True
         self.next_split_index += 1
@@ -370,7 +374,7 @@ class RaceDataManager:
 
     def get_splits(self) -> Optional[list]:
         """Return normalized splits list or None."""
-        return self.splits, self.current_splits, self.ghost_splits
+        return self.splits, self.current_splits, self.best_splits, self.ghost_splits
     
     def get_ghost_time_at_progress(self, progress: float) -> Optional[str]:
         """
