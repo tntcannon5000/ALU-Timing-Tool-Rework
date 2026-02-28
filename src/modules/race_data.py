@@ -24,6 +24,10 @@ class RaceDataManager:
         self.ghost_time_data: Optional[np.ndarray] = None
         self.ghost_filename: Optional[str] = None
         self.no_new_data: bool = True
+        # Velocity data (recorded alongside progress/time)
+        self.current_velocity_data: Optional[np.ndarray] = None
+        self.ghost_velocity_data: Optional[np.ndarray] = None
+        self.split_velocities: Optional[list] = None  # parallel to split_progress, may contain NaN
         # Split-file related data
         self.current_splits: Optional[list] = None # contains the RAW time values at which each of the current splits are recorded
         self.ghost_splits: Optional[list] = None # contains the DURATION of the split in the loaded ghost
@@ -43,6 +47,7 @@ class RaceDataManager:
         """Reset the current race data to empty."""
         self.current_progress_data = np.array([0.0])
         self.current_time_data = np.array([0])
+        self.current_velocity_data = np.array([0.0])
         self.current_splits = []
         self.next_split_index = 0
 
@@ -51,13 +56,14 @@ class RaceDataManager:
         """Check if any race data has been recorded for the current race."""
         return self.current_time_data is not None and len(self.current_time_data) > 1 and not self.no_new_data
     
-    def record_time_at_progress(self, progress: float, time_us: int):
+    def record_time_at_progress(self, progress: float, time_us: int, velocity: float = 0.0):
         """
         Record a time at a specific percentage.
         
         Args:
-            percentage: Percentage point (0-100)
-            time_ms: Time in milliseconds (7 digits, padded with zeros)
+            progress: Race progress 0.0-1.0
+            time_us: Time in microseconds
+            velocity: Raw velocity in m/s at this point
         """
         if 0 <= progress <= 1:
             # 0% is always 0ms by definition
@@ -67,25 +73,28 @@ class RaceDataManager:
                 print(f"Warning: Ignoring invalid time 00.00.000 at {round(progress*100,2)}% (can only be at 0%)")
                 return
             if self.splits is not None and progress >= self.splits[self.next_split_index][1]:
-                self.handle_split_reached(progress, time_us)
+                self.handle_split_reached(progress, time_us, velocity)
             self.current_progress_data = np.append(self.current_progress_data, progress)
             self.current_time_data = np.append(self.current_time_data, time_us)
+            self.current_velocity_data = np.append(self.current_velocity_data, velocity)
             self.no_new_data = False
     
-    def record_final_time(self, time_us: int):
+    def record_final_time(self, time_us: int, velocity: float = 0.0):
         """
         Record the final time at 100% when race completes.
         Ensures the 100% time is never lower than the 99% time.
         
         Args:
             time_us: Final time in microseconds (10 digits, padded with zeros)
+            velocity: Raw velocity in m/s at finish
         """
         
         if self.splits is not None:
-            self.handle_split_reached(1.0, time_us)
+            self.handle_split_reached(1.0, time_us, velocity)
         else:
             self.current_progress_data = np.append(self.current_progress_data, 1.0)
             self.current_time_data = np.append(self.current_time_data, time_us)
+            self.current_velocity_data = np.append(self.current_velocity_data, velocity)
         print(f"Recorded final time at 100%: {time_us}us")
         self.ghost_splits = self.get_ghost_splits()
         self.new_split_available = True
@@ -102,12 +111,16 @@ class RaceDataManager:
                 print("No target filepath provided to save split data")
                 return False
 
+            def _nan_to_none(lst):
+                return [None if (isinstance(v, float) and v != v) else v for v in lst]
             data = {
                 "fingerprint": "ALU_TOOL",
                 "progress": self.ghost_progress_data.tolist() if self.ghost_progress_data is not None else self.current_progress_data.tolist(),
                 "times": self.ghost_time_data.tolist() if self.ghost_time_data is not None else self.current_time_data.tolist(),
+                "velocities": _nan_to_none(self.ghost_velocity_data.tolist()) if self.ghost_velocity_data is not None else None,
                 "split_progress": self.split_progress.tolist() if self.split_progress is not None else self.current_progress_data.tolist(),
                 "split_times": self.split_times.tolist() if self.split_times is not None else self.current_time_data.tolist(),
+                "split_velocities": _nan_to_none(self.split_velocities) if self.split_velocities is not None else None,
                 "splits": self.splits if self.splits is not None else None
             }
 
@@ -131,12 +144,17 @@ class RaceDataManager:
         """
         try:
             # Create the data structure
+            def _nan_to_none(lst):
+                return [None if (isinstance(v, float) and v != v) else v for v in lst]
+            cur_vels = self.current_velocity_data.tolist() if self.current_velocity_data is not None else None
             race_data = {
                 "fingerprint": "ALU_TOOL",
                 "progress": self.current_progress_data.tolist(),
                 "times": self.current_time_data.tolist(),
+                "velocities": cur_vels,
                 "split_progress": self.split_progress.tolist() if self.is_split_loaded else self.current_progress_data.tolist(),
                 "split_times": self.split_times.tolist() if self.is_split_loaded else self.current_time_data.tolist(),
+                "split_velocities": (_nan_to_none(self.split_velocities) if self.split_velocities is not None else cur_vels),
                 "splits": self.splits if self.splits is not None else None,
             }
             
@@ -176,8 +194,21 @@ class RaceDataManager:
             
             self.ghost_progress_data = np.array(data['progress'])
             self.ghost_time_data = np.array(data['times'])
+            # Velocity data — non-fatal if absent (older ghost files)
+            raw_vel = data.get('velocities')
+            if raw_vel is not None and isinstance(raw_vel, list):
+                self.ghost_velocity_data = np.array(
+                    [float('nan') if v is None else float(v) for v in raw_vel], dtype=float
+                )
+            else:
+                self.ghost_velocity_data = None
             self.split_progress = np.array(data['split_progress']) if 'split_progress' in data else None
             self.split_times = np.array(data['split_times']) if 'split_times' in data else None
+            raw_split_vel = data.get('split_velocities')
+            if raw_split_vel is not None and isinstance(raw_split_vel, list):
+                self.split_velocities = [float('nan') if v is None else float(v) for v in raw_split_vel]
+            else:
+                self.split_velocities = None
             self.splits = data['splits'] if 'splits' in data else None
             self.is_split_loaded = self.split_progress is not None and self.split_times is not None
             self.ghost_splits =  self.get_ghost_splits()
@@ -224,39 +255,67 @@ class RaceDataManager:
         if self.next_split_index == 0:
             prog_beginning = [0.0]
             times_beginning = [0]
+            vels_beginning = [0.0]
             prev_split = 0.0
         else:
             prev_split = self.splits[self.next_split_index-1][1]
             prog_beginning = self.split_progress[(self.split_progress <= prev_split)]
             times_beginning = self.split_times[(self.split_progress <= prev_split)]
+            if self.split_velocities is not None:
+                sv = np.array(self.split_velocities, dtype=float)
+                vels_beginning = list(sv[self.split_progress <= prev_split])
+            else:
+                vels_beginning = [float('nan')] * len(prog_beginning)
         # set prog_middle to the progress values between the previous split and the new split, and times_middle to the corresponding times from current_time_data, offset by the difference between the old split time and the new split time
-        prog_middle = self.current_progress_data[(self.current_progress_data > prev_split) & (self.current_progress_data <= new_split)]
-        times_middle = self.current_time_data[(self.current_progress_data > prev_split) & (self.current_progress_data <= new_split)]
+        mask_mid = (self.current_progress_data > prev_split) & (self.current_progress_data <= new_split)
+        prog_middle = self.current_progress_data[mask_mid]
+        times_middle = self.current_time_data[mask_mid]
+        vels_middle = self.current_velocity_data[mask_mid] if self.current_velocity_data is not None else np.full(len(prog_middle), float('nan'))
         print(prev_split,new_split,len(prog_middle), len(times_middle), len(self.current_progress_data), len(self.current_time_data))
         offset = times_beginning[len(prog_beginning)-1] - self.current_splits[self.next_split_index-1] if self.next_split_index > 0 else 0
         times_middle = np.add(times_middle, offset)
+        # velocities don't need the time offset — they are instantaneous values
         if self.next_split_index == len(self.splits) - 1:
             prog_end = []
             times_end = []
+            vels_end = []
         else:
             prog_end = self.split_progress[(self.split_progress > new_split)]
             times_end = self.split_times[(self.split_progress > new_split)]
             #offset = times_middle[len(prog_middle)-1] - self.split_times[np.where(self.split_progress == self.splits[self.next_split_index][1])[0][0]]
             offset = times_middle[len(times_middle)-1] - self.split_times[(self.split_progress == new_split)][0]
             times_end = np.add(times_end, offset)
+            if self.split_velocities is not None:
+                sv = np.array(self.split_velocities, dtype=float)
+                vels_end = list(sv[self.split_progress > new_split])
+            else:
+                vels_end = [float('nan')] * len(prog_end)
         self.split_times = np.concatenate((times_beginning, times_middle, times_end))
         self.split_progress = np.concatenate((prog_beginning, prog_middle, prog_end))
+        self.split_velocities = list(vels_beginning) + list(vels_middle) + list(vels_end)
         self.save_split_data()
 
-    def handle_split_reached(self, progress: float, time_us: int):
+    def handle_split_reached(self, progress: float, time_us: int, velocity: float = 0.0):
         """
         Handle logic for when the next split is reached during a race.
         """
-        time_at_new_split = round(np.interp(self.splits[self.next_split_index][1], 
-                                            np.array([self.current_progress_data[len(self.current_progress_data)-1],progress]), 
-                                            np.array([self.current_time_data[len(self.current_time_data)-1],time_us])))
-        self.current_progress_data = np.append(self.current_progress_data, self.splits[self.next_split_index][1])
+        split_prog = self.splits[self.next_split_index][1]
+        prev_progress = float(self.current_progress_data[-1])
+        prev_time = float(self.current_time_data[-1])
+        prev_velocity = float(self.current_velocity_data[-1]) if self.current_velocity_data is not None else 0.0
+        # Interpolate time at exact split position
+        time_at_new_split = round(np.interp(split_prog,
+                                            np.array([prev_progress, progress]),
+                                            np.array([prev_time, float(time_us)])))
+        # Linearly interpolate velocity at exact split position
+        if progress != prev_progress:
+            frac = (split_prog - prev_progress) / (progress - prev_progress)
+            vel_at_split = prev_velocity + frac * (velocity - prev_velocity)
+        else:
+            vel_at_split = velocity
+        self.current_progress_data = np.append(self.current_progress_data, split_prog)
         self.current_time_data = np.append(self.current_time_data, time_at_new_split)
+        self.current_velocity_data = np.append(self.current_velocity_data, vel_at_split)
         try: total_time = time_at_new_split - self.current_splits[self.next_split_index-1]
         except: total_time = time_at_new_split
         self.current_splits.append(time_at_new_split)
@@ -331,24 +390,27 @@ class RaceDataManager:
     def calculate_delta(self, progress: float, current_time_us: int) -> Optional[float]:
         """
         Calculate the time delta against the ghost at a specific percentage.
+        Uses Hermite spline interpolation when ghost velocity data is available,
+        otherwise falls back to linear interpolation.
         
-        Args:
-            percentage: Percentage point (0-99)
-            current_time_ms: Current time in milliseconds
-            
         Returns:
             Delta in seconds (positive = behind ghost, negative = ahead of ghost) or None
         """
         if not self.ghost_time_data.any() or not self.ghost_progress_data.any():
             return None
-        
-        ghost_time = self.get_ghost_time_at_progress(progress)
-        if not ghost_time:
+        max_prog = float(self.ghost_progress_data[-1])
+        if not (0 <= progress <= max_prog):
             return None
-        
         try:
+            if (self.ghost_velocity_data is not None
+                    and len(self.ghost_velocity_data) == len(self.ghost_progress_data)):
+                ghost_time = self._hermite_interp_time(
+                    progress, self.ghost_progress_data, self.ghost_time_data, self.ghost_velocity_data
+                )
+            else:
+                ghost_time = float(np.interp(progress, self.ghost_progress_data, self.ghost_time_data))
             delta_us = current_time_us - ghost_time
-            return delta_us / 1000000.0  # Convert to seconds
+            return delta_us / 1_000_000.0
         except (ValueError, TypeError):
             return None
     
@@ -360,6 +422,77 @@ class RaceDataManager:
         elif override:
             return True
         return False
+    def get_ghost_velocity_at_progress(self, progress: float) -> Optional[float]:
+        """Return the ghost velocity (m/s) linearly interpolated at the given progress.
+        Returns None if no velocity data is available or progress is out of range.
+        """
+        if self.ghost_velocity_data is None or self.ghost_progress_data is None:
+            return None
+        if len(self.ghost_velocity_data) != len(self.ghost_progress_data):
+            return None
+        valid = ~np.isnan(self.ghost_velocity_data)
+        if not valid.any():
+            return None
+        prog_v = self.ghost_progress_data[valid]
+        vel_v = self.ghost_velocity_data[valid]
+        if len(prog_v) < 1 or progress < float(prog_v[0]) or progress > float(prog_v[-1]):
+            return None
+        return float(np.interp(progress, prog_v, vel_v))
+
+    def _hermite_interp_time(
+        self,
+        progress: float,
+        prog_arr: np.ndarray,
+        time_arr: np.ndarray,
+        vel_arr: np.ndarray,
+    ) -> float:
+        """Estimate time at progress using a Hermite cubic spline.
+
+        Velocity is used as the tangent slope proxy: dt/dp ∝ 1/velocity,
+        meaning faster sections advance through progress more quickly.
+        Falls back to linear interpolation for segments where velocity data is
+        invalid (NaN) or too close to zero.
+        """
+        if len(prog_arr) < 2:
+            return float(np.interp(progress, prog_arr, time_arr))
+
+        # Find enclosing segment [idx, idx+1]
+        idx = int(np.searchsorted(prog_arr, progress, side='right')) - 1
+        idx = max(0, min(idx, len(prog_arr) - 2))
+
+        p0, p1 = float(prog_arr[idx]), float(prog_arr[idx + 1])
+        t0, t1 = float(time_arr[idx]), float(time_arr[idx + 1])
+        v0 = float(vel_arr[idx])
+        v1 = float(vel_arr[idx + 1])
+
+        dp = p1 - p0
+        if dp <= 0:
+            return t0
+
+        # Fall back to linear for NaN or near-zero velocities
+        if v0 != v0 or v1 != v1 or v0 < 0.1 or v1 < 0.1:  # v != v is True only for NaN
+            return float(np.interp(progress, prog_arr, time_arr))
+
+        # Tangents: dt/dp ∝ 1/v, scaled so ∫dt ≈ t1-t0 over [p0, p1]
+        # Trapezoidal estimate: (1/v0 + 1/v1)/2 * k * dp = t1-t0
+        #   => k = (t1-t0) * 2 / ((1/v0 + 1/v1) * dp)
+        inv_sum = 1.0 / v0 + 1.0 / v1
+        k = (t1 - t0) * 2.0 / (inv_sum * dp)
+        m0 = k / v0   # tangent (dt/dp) at p0
+        m1 = k / v1   # tangent (dt/dp) at p1
+
+        u = (progress - p0) / dp
+        u2 = u * u
+        u3 = u2 * u
+
+        # Cubic Hermite basis
+        h00 =  2*u3 - 3*u2 + 1
+        h10 =    u3 - 2*u2 + u
+        h01 = -2*u3 + 3*u2
+        h11 =    u3 -   u2
+
+        return h00*t0 + h10*m0*dp + h01*t1 + h11*m1*dp
+
     def is_ghost_loaded(self) -> bool:
         """Check if a ghost is currently loaded."""
         return self.ghost_time_data is not None and self.ghost_progress_data is not None

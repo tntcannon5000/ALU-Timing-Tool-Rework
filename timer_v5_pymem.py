@@ -47,10 +47,24 @@ class ALUTimingTool:
         self.capturing: bool = True
         self.shutdown_in_progress: bool = False
 
+        # Delta tracking (for vdelta ratio when ghost has no velocity data)
+        self.last_delta_s: Optional[float] = None
+
         # Race state
         self.race_in_progress: bool = False
         self.race_completed: bool = False
         self.reached_high_progress: bool = False  # True once pct >= 98
+        self.init: bool = True  # True until we see the first "menus" state, to ignore stale initial memory
+        self.starting: bool = False  # True during countdown, to show overlays
+
+        # VT false-positive handling: the game sometimes pulses VT=0 briefly
+        # before the real countdown, then returns to 1000000 for a moment.
+        # Strategy: show overlays IMMEDIATELY on "starting" (as before), but
+        # debounce the HIDE when "starting" reverts to "menus".  If the true
+        # countdown follows within HIDE_DEBOUNCE_S seconds, cancel the pending
+        # hide so overlays stay on continuously — no stutter, no late load.
+        self._pending_hide_start: Optional[float] = None  # perf_counter when hide was deferred
+        self._starting_display_shown: bool = False
 
         # Timer & progress
         self.current_timer_us: int = 0
@@ -71,6 +85,7 @@ class ALUTimingTool:
         # Change-detection trackers
         self._prev_timer_us: int = 0
         self._prev_progress: float = 0.0
+        self.last_velocity_raw: float = 0.0  # latest raw velocity for recording
 
         # Performance tracking
         self.loop_times: deque = deque(maxlen=30)
@@ -79,7 +94,7 @@ class ALUTimingTool:
 
         # UI throttling
         self.last_ui_update: float = 0.0
-        self.ui_update_interval: float = 1.0 / 70.0  # ~70 fps
+        self.ui_update_interval: float = 1.0 / 10.0  # ~10 fps
 
         # Setup UI callbacks
         self.ui.set_callbacks(
@@ -117,8 +132,8 @@ class ALUTimingTool:
             except Exception:
                 pass
             try:
-                if hasattr(self.ui, "toggle_split_view_button") and self.ui.toggle_split_view_button:
-                    self.ui.toggle_split_view_button.config(state="normal", bg="#8e44ad")
+                if hasattr(self.ui, "splits_checkbox") and self.ui.splits_checkbox:
+                    self.ui.splits_checkbox.config(state="normal")
             except Exception:
                 pass
         else:
@@ -178,6 +193,15 @@ class ALUTimingTool:
             return
         self._shutdown_all_threads()
 
+    def end_init(self):
+        """Call once we've seen the first 'menus' state to end init phase."""
+        if self.init:
+            self.init = False
+            print("Initial memory state observed — exiting init phase")
+
+    def is_init(self) -> bool:
+        return self.init
+
     # ------------------------------------------------------------------
     # Timer formatting
     # ------------------------------------------------------------------
@@ -210,6 +234,7 @@ class ALUTimingTool:
     # ------------------------------------------------------------------
 
     RACE_ENDED_THRESHOLD_US = 250000  # µs divergence before we confirm race ended
+    HIDE_DEBOUNCE_S = 0.5             # seconds to wait before hiding overlays after a starting→menus transition
 
     @staticmethod
     def _detect_race_state(
@@ -218,7 +243,8 @@ class ALUTimingTool:
         progress_raw: float,
         gear: int,
         rpm: int,
-        estimated_finish_us: int
+        estimated_finish_us: int,
+        init: bool,
     ) -> str:
         """
         Detect current game state from telemetry values.
@@ -237,9 +263,9 @@ class ALUTimingTool:
         # immediately after returning to menus, where the VT stub still holds
         # the last in-race value instead of 1,000,000.
         if timer_raw_us == 0 and progress_raw == 0.0 and rpm == 1250 and gear == 0:
-            return "menus" if race_state_val != 0 else "starting"
+            return "menus" if race_state_val != 0 or init else "starting"
         if (race_state_val == 1000000 or race_state_val == 0) and (gear == 1 or gear == 0) and rpm == 1250 and timer_raw_us == 0 and progress_raw == 0.0:
-            return "menus" if race_state_val == 1000000 else "starting"
+            return "menus" if race_state_val == 1000000 or init else "starting"
         elif (
             race_state_val != 0         # skip VT-divergence check when VT is disabled (always 0)
             and timer_raw_us > 0
@@ -300,7 +326,7 @@ class ALUTimingTool:
         self.estimated_finish_us = final_time
         self.current_timer_display = self._format_timer(final_time, ms=True)
         self.ui.update_delta("−−.−−−")
-        self.race_data_manager.record_final_time(final_time)
+        self.race_data_manager.record_final_time(final_time, self.last_velocity_raw)
 
         mode_label = self.ui.get_current_mode()
         print(
@@ -327,6 +353,9 @@ class ALUTimingTool:
         self._prev_progress = 0
         self.current_timer_us = 0
         self.percentage = "0%"
+        self.last_delta_s = None
+        self._pending_hide_start = None
+        self._starting_display_shown = False
         self.race_data_manager.reset_race_data()
         self.ui.update_save_ghost_button_state()
         print("Race state reset")
@@ -335,14 +364,14 @@ class ALUTimingTool:
     # Per-tick processing helpers
     # ------------------------------------------------------------------
 
-    def _process_percentage_change(self, current_progress: float, prev_pct: float, timer_us: int):
+    def _process_percentage_change(self, current_progress: float, prev_pct: float, timer_us: int, velocity: float = 0.0):
         """Handle a percentage change during a live race."""
         if prev_pct == 0.0 and current_progress > 0.01:
             return False
         if self.race_in_progress and timer_us > 0 and current_progress < 1.0:
             existing = self.race_data_manager.current_progress_data[len(self.race_data_manager.current_progress_data) - 1] if len(self.race_data_manager.current_progress_data) > 0 else 0
             if existing != current_progress or current_progress == 0:
-                self.race_data_manager.record_time_at_progress(current_progress, timer_us)
+                self.race_data_manager.record_time_at_progress(current_progress, timer_us, velocity)
             else:
                 print(f"Skipping {current_progress*100:.2f}% — already recorded as {existing}us")
             self.ui.update_save_ghost_button_state()
@@ -354,7 +383,8 @@ class ALUTimingTool:
             if current_progress < 1:
                 delta_seconds = self.race_data_manager.calculate_delta(current_progress, timer_us)
                 if delta_seconds is not None:
-                    sign = "+" if delta_seconds >= 0 else "−"
+                    self.last_delta_s = delta_seconds
+                    sign = "+" if delta_seconds >= 0 else "\u2212"
                     if abs(delta_seconds) < 10.0: delta_str = f"{sign}{round(abs(delta_seconds), 3):.3f}"
                     elif abs(delta_seconds) < 100.0: delta_str = f"{sign}{round(abs(delta_seconds), 2):.2f}"
                     else: delta_str = f"{sign}{round(abs(delta_seconds), 1):.1f}"
@@ -400,10 +430,9 @@ class ALUTimingTool:
           anything → starting      : new race countdown, reset stale data
         """
         print("Starting main loop (pymem backend)...")
-        prev_game_state = "menus"
+        prev_game_state = "startup"
         _debug_log_interval = 3.0
         _last_debug_log = 0.0
-        init = True
 
         while self.capturing:
             loop_start = systime.perf_counter()
@@ -415,7 +444,7 @@ class ALUTimingTool:
                 # Sleep briefly to avoid busy-spinning, then skip this tick.
                 systime.sleep(0.001)
                 continue
-            print(f"[DEBUG] Memory read: {vals}")  # Debug log for each memory read
+            #print(f"[DEBUG] Memory read: {vals}")  # Debug log for each memory read
             self.total_loops += 1
 
             timer_raw_us   = vals["timer_raw"]
@@ -423,8 +452,12 @@ class ALUTimingTool:
             race_state_val = vals["visual_timer"]
             gear           = vals["gear"]
             rpm            = vals["rpm"]
-            velocity_kmh   = vals.get("velocity_kmh", 0.0)
-
+            velocity_raw   = vals.get("velocity_raw", 0.0)
+            physics_update = vals.get("physics_update", False)
+            steering_raw   = vals.get("steering_raw", 0.0)
+            self.last_velocity_raw = velocity_raw
+            if race_state_val == 1000000:
+                self.end_init()
             # -- Periodic debug log ------------------------------------
             _now_mono = systime.perf_counter()
             if _now_mono - _last_debug_log >= _debug_log_interval:
@@ -440,7 +473,7 @@ class ALUTimingTool:
 
             # -- Game state detection ----------------------------------
             game_state = self._detect_race_state(
-                race_state_val, timer_raw_us, progress_raw, gear, rpm, self.estimated_finish_us
+                race_state_val, timer_raw_us, progress_raw, gear, rpm, self.estimated_finish_us, self.init
             )
 
             # -- State transitions -------------------------------------
@@ -452,7 +485,20 @@ class ALUTimingTool:
                 self.race_in_progress = True
                 self.ui.update_delta("=0.000")
                 self.ui.update_background_color("Race vs Ghost", 0)
-                self.ui.update_splits(timer_raw_us, progress_raw)
+                # Cancel any pending hide (false positive resolved — we’re racing).
+                self._pending_hide_start = None
+                # Fallback: if begin_race_display was never called (e.g. game
+                # skipped "starting" entirely and jumped straight to racing),
+                # fire it now so overlays are guaranteed visible.
+                if not self._starting_display_shown:
+                    self._starting_display_shown = True
+                    self.starting = True
+                    ghost_loaded_now = self.race_data_manager.is_ghost_loaded()
+                    self.ui.begin_race_display(self.ui.get_current_mode(), ghost_loaded_now)
+                    try:
+                        self.ui.update_splits(0, 0.0)
+                    except Exception:
+                        pass
                 print("Race active — recording")
 
             # Transition to "ended" — game says race finished.
@@ -461,38 +507,87 @@ class ALUTimingTool:
                 if not self.race_completed and self.race_in_progress:
                     print("Game state: Race Ended")
                     self._handle_race_completion()
+                # Hide overlays on race end
+                self.ui.update_gear_rpm(0, 0, False)
+                self.ui.update_velocity(0.0, False)
+                self.ui.update_steering(0.0, False)
+                self.ui.update_vdelta(0.0, None, False)
+                self.ui.auto_hide_race_overlays()
+                self.ui.schedule_split_view_reset()
             elif game_state == "ended_pl" and prev_game_state == "racing_pl":
                 if not self.race_completed and self.race_in_progress:
                     print("Game state: Race Ended")
                     self._handle_race_completion(True)
+                # Hide overlays on race end
+                self.ui.update_gear_rpm(0, 0, False)
+                self.ui.update_velocity(0.0, False)
+                self.ui.update_steering(0.0, False)
+                self.ui.update_vdelta(0.0, None, False)
+                self.ui.auto_hide_race_overlays()
+                self.ui.schedule_split_view_reset()
 
             if game_state == "starting" and prev_game_state != "starting":
-                print("\nCountdown detected — resetting GUI for race start\n")
+                # Cancel any pending hide from a prior false positive.
+                self._pending_hide_start = None
+                self._starting_display_shown = True
+                self.starting = True
+                print("Countdown started - Loading Race GUI")
                 self.ui.update_timer("00:00.000")
-                self.ui.update_delta("−−.−−−")
+                if self.ui.get_current_mode() == "Race vs Ghost":
+                    self.ui.update_delta("=0.000")
+                    self.ui.update_background_color("Race vs Ghost", 0)
+                else:
+                    self.ui.update_delta("−−.−−−")
+                ghost_loaded_now = self.race_data_manager.is_ghost_loaded()
+                self.ui.begin_race_display(self.ui.get_current_mode(), ghost_loaded_now)
+                try:
+                    self.ui.update_splits(0, 0.0)
+                except Exception:
+                    pass
+            elif game_state != "starting" and prev_game_state == "starting":
+                self._starting_display_shown = False
+                self.starting = False
 
             # Transition to "menus" — player left
             if game_state == "menus" and prev_game_state != "menus":
-                if self.race_in_progress and not self.race_completed and not init:
+                if self.race_in_progress and not self.race_completed and not self.init:
                     print("Returned to menus mid-race — discarding partial data")
                     self.current_timer_display = "Quit Race"
                     self.ui.update_delta("−−.−−−")
                     self.race_in_progress = False
-                elif self.race_in_progress and not init:
+                elif self.race_in_progress and not self.init:
                     self.race_in_progress = False
                     print("Returned to menus after race completion")
-                elif init:
+                elif self.init:
                     print("Initial state: Menus")
                     self.current_timer_display = "00:00.000"
                     self.ui.update_delta("−−.−−−")
                     self.reset_race_state()
+                # Hide overlay calls & cleanup
+                self.ui.update_gear_rpm(0, 0, False)
+                self.ui.update_velocity(0.0, False)
+                self.ui.update_steering(0.0, False)
+                self.ui.update_vdelta(0.0, None, False)
+                if prev_game_state == "starting":
+                    # Could be a false positive — defer the hide so a rapidly
+                    # following true countdown can cancel it without a stutter.
+                    self._pending_hide_start = systime.perf_counter()
+                else:
+                    # Genuine return to menus after racing/ended.
+                    self.ui.auto_hide_race_overlays()
+                    self.ui.schedule_split_view_reset()
                 self._prev_timer_us = 0
                 self._prev_progress = 0
                 self.current_timer_us = 0
                 self.percentage = "0%"
                 self.last_captured_timer_us = 0
-            if game_state == "menus":
-                init = False
+
+            # Flush a pending hide if enough time has passed and we’re still in menus.
+            if self._pending_hide_start is not None and game_state == "menus":
+                if systime.perf_counter() - self._pending_hide_start >= self.HIDE_DEBOUNCE_S:
+                    self._pending_hide_start = None
+                    self.ui.auto_hide_race_overlays()
+                    self.ui.schedule_split_view_reset()
             prev_game_state = game_state
 
             # -- Only process data while actually racing ---------------
@@ -523,7 +618,7 @@ class ALUTimingTool:
             # -- Percentage change -------------------------------------
             pct_changed = progress_raw != self._prev_progress
             if pct_changed and actively_racing and not self.race_completed:
-                if self._process_percentage_change(progress_raw, self._prev_progress, timer_raw_us):
+                if self._process_percentage_change(progress_raw, self._prev_progress, timer_raw_us, velocity_raw):
                     self._prev_progress = progress_raw
 
             if actively_racing:
@@ -543,13 +638,27 @@ class ALUTimingTool:
 
             # -- Throttled UI updates ----------------------------------
             now = systime.time()
-            if now - self.last_ui_update >= self.ui_update_interval:
+            # Overlays visible during countdown and while actively racing
+            should_show_overlays = game_state in ("racing_pl", "racing_sp") or self.starting
+            if physics_update or (now - self.last_ui_update >= self.ui_update_interval):
                 self.ui.update_timer(self.current_timer_display)
                 if self.race_data_manager.is_new_split_available():
                     self.ui.update_splits(timer_raw_us, progress_raw)
                 self.ui.update_percentage(self.percentage)
-                self.ui.update_gear_rpm(gear, rpm, actively_racing)
-                self.ui.update_velocity(velocity_kmh, actively_racing)
+                self.ui.update_gear_rpm(gear, rpm, should_show_overlays)
+                self.ui.update_velocity(velocity_raw, should_show_overlays)
+                self.ui.update_steering(steering_raw, should_show_overlays)
+                # Velocity delta: compare current speed vs ghost speed at same progress
+                ghost_loaded = self.race_data_manager.is_ghost_loaded()
+                ghost_vel_raw = None
+                if ghost_loaded and actively_racing:
+                    ghost_vel_raw = self.race_data_manager.get_ghost_velocity_at_progress(progress_raw)
+                self.ui.update_vdelta(
+                    velocity_raw, ghost_vel_raw, should_show_overlays,
+                    ghost_loaded=ghost_loaded and actively_racing,
+                    delta_s=self.last_delta_s,
+                    current_timer_us=timer_raw_us,
+                )
                 self.last_ui_update = now
 
             # -- Loop timing -------------------------------------------

@@ -81,14 +81,15 @@ class UIConfigManager:
         """
         result = self.default_config.copy()
         
-        # Safely merge configuration
+        # Safely merge configuration — include ALL saved keys, not just defaults.
+        # Previously this filtered to only keys present in default_config, which
+        # silently dropped vel_mode, steering_enabled, splits_enabled, etc.
         if isinstance(config, dict):
             for key, value in config.items():
-                if key in result:
-                    if isinstance(result[key], dict) and isinstance(value, dict):
-                        result[key].update(value)
-                    else:
-                        result[key] = value
+                if isinstance(result.get(key), dict) and isinstance(value, dict):
+                    result[key].update(value)
+                else:
+                    result[key] = value
         
         return result
     

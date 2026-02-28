@@ -495,6 +495,46 @@ def _build_local_player_stub(alloc_base: int, return_addr: int) -> bytes:
     return bytes(bytearray(_CODE_OFFSET) + code)
 
 
+def _build_steering_stub(alloc_base: int, return_addr: int) -> bytes:
+    """
+    Hook: movss [rsi+0x1540],xmm1   (F3 0F 11 8E 40 15 00 00 — 8 bytes)
+
+    This instruction writes the current steering wheel angle in radians.
+    The steering *input* value (−1.0 to +1.0) is stored at rsi+0x1544,
+    exactly 4 bytes after the hooked write target.
+
+    Data layout at alloc_base:
+      +0 : SteeringInput (float, 4 bytes) — raw IEEE-754 bits of steering input.
+
+    Patch at hook site: E9 <rel32> 90 90 90  (5-byte JMP + 3 NOPs)
+    """
+    code_base = alloc_base + _CODE_OFFSET
+    code = bytearray()
+
+    def pos() -> int:
+        return code_base + len(code)
+
+    # ── original instruction: movss [rsi+0x1540],xmm1 ────────────────────
+    # F3 0F 11 8E 40 15 00 00
+    code += b"\xF3\x0F\x11\x8E\x40\x15\x00\x00"
+
+    # ── copy steering input float bits from [rsi+0x1544] ─────────────────
+    # push rax                                             50
+    code += b"\x50"
+    # mov eax,[rsi+0x1544]                                 8B 86 44 15 00 00
+    code += b"\x8B\x86\x44\x15\x00\x00"
+    # mov [rip+XX],eax  — SteeringInput                    89 05 <rel32>
+    code += b"\x89\x05"
+    code += _rel32(pos() + 4, alloc_base + 0)
+    # pop rax                                              58
+    code += b"\x58"
+
+    # ── JMP back ─────────────────────────────────────────────────────────
+    code += _jmp_back(pos(), return_addr)
+
+    return bytes(bytearray(_CODE_OFFSET) + code)
+
+
 # ---------------------------------------------------------------------------
 # DataExtractor — drop-in replacement for CheatEngineClient
 # ---------------------------------------------------------------------------
@@ -549,6 +589,12 @@ class DataExtractor:
         b"\x83\xB8\x04\x01\x00\x00\x02\x0F\x95\xC0"
     )  # cmp dword ptr [rax+104h],2 ; setne al
 
+    # Hook 6 — Steering (permanent): movss [rsi+0x1540],xmm1
+    # Read input value at rsi+0x1544 — 8-byte instruction → JMP(5) + NOP×3
+    _AOB_STEERING = re.escape(
+        b"\xF3\x0F\x11\x8E\x40\x15\x00\x00\x48\x63\x48"
+    )  # movss [rsi+0x1540],xmm1 + first 3 bytes of next instruction
+
     PROCESS_NAME = "Asphalt9_Steam_x64_rtl.exe"
 
     # Safety hard cap for the capture poll loop (seconds).  The loop normally exits
@@ -575,6 +621,12 @@ class DataExtractor:
         self._inj_vt:       Optional[int] = None   # patched address
         self._saved_vt:     dict          = {}      # {addr: orig_bytes}
         self._vt_installed: bool          = False
+
+        # ── Permanent Steering hook ───────────────────────────────────────
+        self._alloc_steering:     Optional[int] = None
+        self._inj_steering:       Optional[int] = None
+        self._saved_steering:     dict          = {}
+        self._steering_installed: bool          = False
 
         # ── Captured struct base addresses (set after _capture_addresses) ──
         # Each hook uses a DIFFERENT rdi pointing to a different game object:
@@ -627,8 +679,9 @@ class DataExtractor:
         self._progress_raw:  float = 0.0
         self._rpm:           int   = 1250
         self._gear:          int   = 0
-        self._visual_timer:  int   = 0
-        self._velocity_kmh:  float = 0.0
+        self._visual_timer:  int   = 1000000
+        self._velocity_raw:  float = 0.0
+        self._steering_raw:  float = 0.0
         self._connected:     bool  = False
         self._last_ok:       float = 0.0
 
@@ -652,12 +705,15 @@ class DataExtractor:
             self._attach()
         if self._pm is not None and not self._vt_installed:
             self._install_vt_hook()
+        if self._pm is not None and not self._steering_installed:
+            self._install_steering_hook()
         if self._pm is not None and self._local_struct_offset == 0:
             self._read_local_struct_offset()
 
     def stop(self) -> None:
-        """Remove all hooks (permanent VT + any live temporary hooks) and release resources."""
+        """Remove all hooks (permanent VT + steering + any live temporary hooks) and release resources."""
         self._emergency_remove_temp_hooks()
+        self._remove_steering_hook()
         self._remove_vt_hook()
         print("[DataExtractor] Stopped")
 
@@ -677,7 +733,8 @@ class DataExtractor:
                 "rpm":          self._rpm,
                 "gear":         self._gear,
                 "visual_timer": self._visual_timer,
-                "velocity_kmh": self._velocity_kmh,
+                "velocity_raw": self._velocity_raw,
+                "steering_raw": self._steering_raw,
             }
 
     def get_timer_ms(self) -> int:
@@ -704,7 +761,7 @@ class DataExtractor:
     def get_velocity(self) -> float:
         """Return the current speed magnitude in km/h."""
         with self._lock:
-            return self._velocity_kmh
+            return self._velocity_raw
 
     def is_connected(self) -> bool:
         with self._lock:
@@ -719,7 +776,8 @@ class DataExtractor:
                 "visual_timer":    self._visual_timer,
                 "rpm":             self._rpm,
                 "gear":            self._gear,
-                "velocity_kmh":    self._velocity_kmh,
+                "velocity_raw":    self._velocity_raw,
+                "steering_raw":    self._steering_raw,
             }
 
     # -----------------------------------------------------------------------
@@ -961,6 +1019,55 @@ class DataExtractor:
             self._alloc_vt     = None
         self._inj_vt       = None
         self._vt_installed = False
+
+    def _install_steering_hook(self) -> bool:
+        """
+        Install the permanent steering input trampoline.
+
+        Scans for the movss [rsi+0x1540],xmm1 instruction and hooks it to
+        capture the steering input float at rsi+0x1544 every frame.
+        Returns True on success.
+        """
+        if not self._pm:
+            return False
+        handle = self._pm.process_handle
+
+        inj = self._aob_scan(self._AOB_STEERING)
+        if inj is None:
+            print(f"[DataExtractor] \u26a0 Steering AOB not found — steering display unavailable "
+                  f"(reason: {self._last_fail_reason})")
+            return False
+
+        print(f"[DataExtractor] Steering hook: installing at {inj:#x}")
+        alloc = _valloc_near(handle, inj)
+        self._alloc_steering = alloc
+
+        stub = _build_steering_stub(alloc, inj + 8)
+        self._pm.write_bytes(alloc, stub, len(stub))
+
+        patch = _jmp_rel32(inj, alloc + _CODE_OFFSET) + b"\x90\x90\x90"
+        self._write_patch(inj, patch, self._saved_steering)
+
+        self._inj_steering       = inj
+        self._steering_installed = True
+        print(f"[DataExtractor] \u2713 Steering hook (permanent) installed @ {inj:#x} "
+              f"\u2192 stub @ {alloc + _CODE_OFFSET:#x}, data @ {alloc:#x}")
+        return True
+
+    def _remove_steering_hook(self) -> None:
+        """Remove the permanent steering hook and free its allocation."""
+        if not self._pm:
+            return
+        if self._saved_steering:
+            self._restore_patches(self._saved_steering)
+        if self._alloc_steering:
+            try:
+                _vfree(self._pm.process_handle, self._alloc_steering)
+            except Exception:
+                pass
+            self._alloc_steering     = None
+        self._inj_steering       = None
+        self._steering_installed = False
 
     def _emergency_remove_temp_hooks(self) -> None:
         """
@@ -1585,7 +1692,18 @@ class DataExtractor:
         progress:     float = 0.0
         rpm:          int   = 1250
         gear:         int   = 0
-        velocity_kmh: float = 0.0
+        velocity_raw: float = 0.0
+        steering_raw: float = 0.0
+
+        # Read steering from permanent stub (always active when installed)
+        if self._steering_installed and self._alloc_steering:
+            try:
+                s = self._pm.read_float(self._alloc_steering)
+                # Clamp and sanitise — catch NaN/Inf from uninitialised stub memory
+                if -2.0 <= s <= 2.0:
+                    steering_raw = max(-1.0, min(1.0, s))
+            except Exception:
+                pass
 
         if self._direct_mode:
             try:
@@ -1606,7 +1724,7 @@ class DataExtractor:
                     vx = pm.read_float(player_base + 0x160)
                     vz = pm.read_float(player_base + 0x164)
                     vy = pm.read_float(player_base + 0x168)
-                    velocity_kmh = math.sqrt(vx*vx + vz*vz + vy*vy) * 3.6
+                    velocity_raw = math.sqrt(vx*vx + vz*vz + vy*vy)
             except Exception as exc:
                 self._last_fail_reason = str(exc)
                 self.reads_failed += 1
@@ -1635,7 +1753,10 @@ class DataExtractor:
 
         if not changed:
             return False
-
+        prev_velocity = prev["velocity_raw"] if prev else None
+        prev_rpm      = prev["rpm"]          if prev else None
+        prev_gear     = prev["gear"]         if prev else None
+        changed = (prev is None) or (velocity_raw != prev_velocity) or (rpm != prev_rpm) or (gear != prev_gear)
         # ── 7b. Stabilising second read ───────────────────────────────
         # Sleep 1 ms so the game engine has time to finish writing all
         # fields for the current frame, then re-read everything.  This
@@ -1660,8 +1781,15 @@ class DataExtractor:
                     vx = pm.read_float(player_base + 0x160)
                     vz = pm.read_float(player_base + 0x164)
                     vy = pm.read_float(player_base + 0x168)
-                    velocity_kmh = math.sqrt(vx*vx + vz*vz + vy*vy) * 3.6
+                    velocity_raw = math.sqrt(vx*vx + vz*vz + vy*vy)
                 current_vt = self._pm.read_uint(self._alloc_vt)
+                if self._steering_installed and self._alloc_steering:
+                    try:
+                        s = self._pm.read_float(self._alloc_steering)
+                        if -2.0 <= s <= 2.0:
+                            steering_raw = max(-1.0, min(1.0, s))
+                    except Exception:
+                        pass
             except Exception:
                 pass  # keep first-read values if second read fails
 
@@ -1671,7 +1799,9 @@ class DataExtractor:
             "rpm":          rpm,
             "gear":         gear,
             "visual_timer": current_vt,
-            "velocity_kmh": velocity_kmh,
+            "velocity_raw": velocity_raw,
+            "steering_raw": steering_raw,
+            "physics_update": changed
         }
         self._prev_vals = new_vals
 
@@ -1682,7 +1812,8 @@ class DataExtractor:
             self._progress_raw = progress
             self._rpm          = rpm
             self._gear         = gear
-            self._velocity_kmh = velocity_kmh
+            self._velocity_raw = velocity_raw
+            self._steering_raw = steering_raw
             self._visual_timer = current_vt
             self._connected    = True
             self._last_ok      = time.time()
@@ -1691,7 +1822,7 @@ class DataExtractor:
             print(
                 f"[DataExtractor] First direct read: "
                 f"timer={timer_raw}, progress={progress:.4f}, gear={gear}, "
-                f"vt={current_vt}, rpm={rpm}, velocity={velocity_kmh:.1f}km/h"
+                f"vt={current_vt}, rpm={rpm}, velocity={velocity_raw:.1f}"
             )
             self._first_read_logged = True
 
