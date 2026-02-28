@@ -4,7 +4,7 @@ venvbak/
 dataset/
 
 # User config
-ui_config.json
-
+data/ui_config.json
+data/debug_log.txt
 # Race data output
 runs/

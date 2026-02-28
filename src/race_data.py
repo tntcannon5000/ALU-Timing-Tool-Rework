@@ -37,7 +37,7 @@ class RaceDataManager:
         self.next_split_index: Optional[float] = None  # index of the next split
         self.new_split_available: bool = False
         # Ensure runs/ directory exists
-        self.runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "runs")
+        self.runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
         os.makedirs(self.runs_dir, exist_ok=True)
         # Initialize empty race data for all percentages (0-100)
         self.reset_race_data()
@@ -101,8 +101,10 @@ class RaceDataManager:
     
     def save_split_data(self) -> bool:
         """
-        Save the current split ghost back to JSON. If filepath is None, uses the
-        last-loaded split filepath. Returns True on success.
+        Save the current split ghost back to JSON. Only updates the
+        'split_progress', 'split_times', and 'split_velocities' fields,
+        leaving everything else in the file exactly as it was saved before.
+        Returns True on success.
         """
         try:
             target = self.ghost_filename
@@ -110,21 +112,23 @@ class RaceDataManager:
                 print("No target filepath provided to save split data")
                 return False
 
+            # Read the existing file so we preserve all other fields
+            try:
+                with open(target, 'r') as f:
+                    existing = json.load(f)
+            except Exception:
+                existing = {}
+
             def _nan_to_none(lst):
                 return [None if (isinstance(v, float) and v != v) else v for v in lst]
-            data = {
-                "fingerprint": "ALU_TOOL",
-                "progress": self.ghost_progress_data.tolist() if self.ghost_progress_data is not None else self.current_progress_data.tolist(),
-                "times": self.ghost_time_data.tolist() if self.ghost_time_data is not None else self.current_time_data.tolist(),
-                "velocities": _nan_to_none(self.ghost_velocity_data.tolist()) if self.ghost_velocity_data is not None else None,
-                "split_progress": self.split_progress.tolist() if self.split_progress is not None else self.current_progress_data.tolist(),
-                "split_times": self.split_times.tolist() if self.split_times is not None else self.current_time_data.tolist(),
-                "split_velocities": _nan_to_none(self.split_velocities) if self.split_velocities is not None else None,
-                "splits": self.splits if self.splits is not None else None
-            }
+
+            # Only overwrite the three split fields
+            existing["split_progress"] = self.split_progress.tolist() if self.split_progress is not None else self.current_progress_data.tolist()
+            existing["split_times"] = self.split_times.tolist() if self.split_times is not None else self.current_time_data.tolist()
+            existing["split_velocities"] = _nan_to_none(self.split_velocities) if self.split_velocities is not None else None
 
             with open(target, 'w') as f:
-                json.dump(data, f, indent=2)
+                json.dump(existing, f, indent=2)
 
             return True
         except Exception as e:
@@ -288,6 +292,7 @@ class RaceDataManager:
         self.split_progress = np.concatenate((prog_beginning, prog_middle, prog_end))
         self.split_velocities = list(vels_beginning) + list(vels_middle) + list(vels_end)
         self.save_split_data()
+        self.ghost_splits = self.get_ghost_splits()
 
     def handle_split_reached(self, progress: float, time_us: int, velocity: float = 0.0):
         """

@@ -67,8 +67,8 @@ python -m pip install --upgrade pip
 echo.
 
 REM Install dependencies
-echo Installing dependencies from requirements_use.txt...
-pip install -r requirements_use.txt
+echo Installing dependencies from data\requirements.txt...
+pip install -r data\requirements.txt
 if errorlevel 1 (
     echo ERROR: Failed to install dependencies.
     pause
@@ -84,6 +84,6 @@ echo To run the timing tool:
 echo   1. Activate venv:  venv\Scripts\activate.bat
 echo   2. Run:            python main.py
 echo.
-echo Or use quick_start.bat
+echo Or use _quick_start.bat
 echo.
 pause

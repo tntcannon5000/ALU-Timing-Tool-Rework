@@ -12,7 +12,7 @@ Prerequisites:
 
 import sys
 import signal
-from timer_v5_pymem import ALUTimingTool
+from src.timer_v5_pymem import ALUTimingTool
 
 
 def signal_handler(sig, frame):

@@ -23,7 +23,9 @@ class UIConfigManager:
             config_file: Name of the configuration file
         """
         self.config_file = config_file
-        self.config_path = os.path.join(os.getcwd(), config_file)
+        self.config_path = os.path.join(os.getcwd(), "data", config_file)
+        # Ensure the data/ directory exists so config can be written on first run
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
         self.default_config = {
             "window_position": {"x": 100, "y": 100},
             "window_size": {"width": 300, "height": 120},
@@ -42,6 +44,7 @@ class UIConfigManager:
             True if successful, False otherwise
         """
         try:
+            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2)
             return True

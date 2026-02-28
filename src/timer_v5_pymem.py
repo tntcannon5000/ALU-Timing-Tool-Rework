@@ -21,11 +21,9 @@ import threading
 from collections import deque
 from typing import Optional
 
-from src.modules import (
-    TimingToolUI,
-    RaceDataManager,
-    DataExtractor,
-)
+from .ui import TimingToolUI
+from .race_data import RaceDataManager
+from .data_extractor import DataExtractor
 
 
 class ALUTimingTool:
@@ -79,6 +77,16 @@ class ALUTimingTool:
         # Finish detection (progress/timer stall method)
         self._finish_locked: bool = False
         self._final_timer_us: int = 0   # last timer while racing ("true final")
+
+        # Multiplayer wreck failsafe
+        # When the PL finish trigger fires we don't commit the estimate
+        # immediately.  Instead we start a 2-second check:
+        #   "waiting_2s"       — waiting to see if the timer stops (real finish)
+        #   "waiting_progress" — 2s elapsed with timer still running; waiting
+        #                        for progress to resume before deciding
+        self._pl_wreck_check_state: Optional[str] = None
+        self._pl_wreck_check_ts: Optional[float] = None
+        self._pl_stale_estimate: Optional[int] = None
 
         # Guard against stale progress: memory keeps 100% from race N-1.
         # Only allow finish detection once we've seen progress < 50% this race.
@@ -166,6 +174,7 @@ class ALUTimingTool:
         success = self.race_data_manager.save_race_data(filepath.replace(".json", ""))
         if success:
             self.ui.show_ghost_saved_message()
+            self.ui.set_pb_detected(False)
             print(f"Saved ghost: {filepath}")
             # If the user overwrote the currently loaded ghost, auto-reload it
             # so the ghost data reflects the just-saved race.  Do NOT show the
@@ -338,6 +347,13 @@ class ALUTimingTool:
             f"Final: {self._format_timer(final_time)}"
         )
 
+        # Check for personal best (only meaningful in Race vs Ghost mode)
+        if mode_label == "Race vs Ghost" and self.race_data_manager.is_ghost_loaded():
+            delta_at_finish = self.race_data_manager.calculate_delta(1.0, final_time)
+            if delta_at_finish is not None and delta_at_finish < 0:
+                print(f"New PB detected! Delta at finish: {delta_at_finish:.3f}s")
+                self.ui.set_pb_detected(True)
+
     def reset_race_state(self):
         """Reset all per-race tracking for a fresh race.
 
@@ -360,8 +376,12 @@ class ALUTimingTool:
         self.last_delta_s = None
         self._last_starting_ts = None
         self._starting_display_shown = False
+        self._pl_wreck_check_state = None
+        self._pl_wreck_check_ts = None
+        self._pl_stale_estimate = None
         self.race_data_manager.reset_race_data()
         self.ui.update_save_ghost_button_state()
+        self.ui.set_pb_detected(False)
         print("Race state reset")
 
     # ------------------------------------------------------------------
@@ -609,6 +629,9 @@ class ALUTimingTool:
                 self.estimated_finish_us = None
                 self._finish_locked = False
                 self._progress_legitimized = False
+                self._pl_wreck_check_state = None
+                self._pl_wreck_check_ts = None
+                self._pl_stale_estimate = None
 
             float_pct = round(progress_raw * 100, 2) if 0.0 <= progress_raw <= 1.0 else round(progress_raw, 2)
             if float_pct < 50.0 and self.race_in_progress:
@@ -622,9 +645,43 @@ class ALUTimingTool:
                     progress_raw, self._prev_progress, timer_raw_us, self._prev_timer_us
                 )
                 if finish_us is not None:
-                    self.estimated_finish_us = finish_us
+                    # Don't commit immediately — start 2-second wreck check
+                    self._pl_stale_estimate = finish_us
+                    self._pl_wreck_check_state = "waiting_2s"
+                    self._pl_wreck_check_ts = systime.perf_counter()
                     self._finish_locked = True
-                    print(f"Finish detected — estimate: {self._format_timer(finish_us)}")
+                    print(f"Finish candidate (PL) — starting wreck check: {self._format_timer(finish_us)}")
+
+            # -- Multiplayer wreck failsafe --------------------------------
+            # Delayed commit: only set estimated_finish_us once we are
+            # confident the finish wasn't a wreck false-positive.
+            if is_pl and self._pl_wreck_check_state is not None:
+                _wc_now = systime.perf_counter()
+                if self._pl_wreck_check_state == "waiting_2s":
+                    timer_stopped = (timer_raw_us == self._prev_timer_us)
+                    if timer_stopped:
+                        # Timer already stopped — real finish, commit estimate
+                        self.estimated_finish_us = self._pl_stale_estimate
+                        self._pl_wreck_check_state = None
+                        print(f"PL finish confirmed (timer stopped): {self._format_timer(self._pl_stale_estimate)}")
+                    elif _wc_now - self._pl_wreck_check_ts >= 2.0:
+                        # 2 s elapsed, timer still running — possible wreck
+                        self._pl_wreck_check_state = "waiting_progress"
+                        print("PL wreck check: 2 s elapsed, timer still running — waiting for progress change")
+                elif self._pl_wreck_check_state == "waiting_progress":
+                    if progress_raw != self._prev_progress:
+                        timer_still_running = (timer_raw_us > self._prev_timer_us)
+                        if timer_still_running:
+                            # Progress resumed with timer running — wreck confirmed
+                            self._finish_locked = False
+                            self._pl_wreck_check_state = None
+                            self._pl_stale_estimate = None
+                            print("PL wreck confirmed — undoing false finish, restarting detection")
+                        else:
+                            # Timer stopped by the time progress changed — use stale
+                            self.estimated_finish_us = self._pl_stale_estimate
+                            self._pl_wreck_check_state = None
+                            print(f"PL timer stopped (fallback): {self._format_timer(self._pl_stale_estimate)}")
 
             # -- Percentage change -------------------------------------
             pct_changed = progress_raw != self._prev_progress

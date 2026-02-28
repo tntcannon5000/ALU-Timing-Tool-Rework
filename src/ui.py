@@ -12,7 +12,7 @@ import shutil
 import threading
 import sys
 import os
-from src.utils.ui_config import UIConfigManager
+from .ui_config import UIConfigManager
 
 
 class TimingToolUI:
@@ -55,6 +55,7 @@ class TimingToolUI:
 
         # Race panel elements
         self.ghost_filename_label = None
+        self.race_control_indicator = None
         self.mode_var = None
         self.mode_combobox = None
         self.load_ghost_button = None
@@ -360,7 +361,7 @@ class TimingToolUI:
         """Open file dialog to load a ghost file."""
         if self.on_load_ghost:
             filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
-            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "runs")
+            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
             os.makedirs(runs_dir, exist_ok=True)
             filename = filedialog.askopenfilename(
                 title="Load Race Ghost",
@@ -375,7 +376,7 @@ class TimingToolUI:
         """Open file dialog to load a split-type ghost file."""
         if hasattr(self, 'on_load_split') and self.on_load_split:
             filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
-            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "runs")
+            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
             os.makedirs(runs_dir, exist_ok=True)
             filename = filedialog.askopenfilename(
                 title="Load Split Race Ghost",
@@ -390,7 +391,7 @@ class TimingToolUI:
         """Open file dialog to save current race data as ghost file."""
         if self.on_save_ghost:
             filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
-            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "runs")
+            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
             os.makedirs(runs_dir, exist_ok=True)
             # Default to the currently loaded ghost name so overwriting is one click.
             default_name = os.path.splitext(self._current_ghost_name)[0] if self._current_ghost_name else ""
@@ -456,6 +457,25 @@ class TimingToolUI:
                     self.save_ghost_button.config(state="disabled", bg="#7f8c8d")
             except tk.TclError:
                 pass
+
+    def set_pb_detected(self, is_pb: bool):
+        """
+        Update the ALU Timer title label to indicate a new personal best.
+
+        When is_pb is True the label changes to 'New PB! Save Ghost?' in green.
+        When False it reverts to the default 'ALU Timer v5.0' in white.
+        """
+        if not hasattr(self, 'race_control_indicator') or not self.race_control_indicator:
+            return
+        try:
+            if not self.race_control_indicator.winfo_exists():
+                return
+            if is_pb:
+                self.race_control_indicator.config(text="New PB! Save Ghost?", fg="#2ecc71")
+            else:
+                self.race_control_indicator.config(text="ALU Timer v5.0", fg="white")
+        except tk.TclError:
+            pass
 
     # ──────────────────────────────────────────────────────────────────────
     #  Split view
