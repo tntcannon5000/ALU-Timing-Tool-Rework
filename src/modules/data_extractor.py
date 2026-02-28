@@ -1636,9 +1636,6 @@ class DataExtractor:
         # Periodic VT diagnostic — print every 2 s so we can see what the hook captures.
         _now_ts = time.time()
         if _now_ts - self._last_vt_log >= 2.0:
-            #print(f"[DataExtractor] VT tick: raw={current_vt}  prev={self._prev_vt}  "
-            #      f"direct_mode={self._direct_mode}  "
-            #      f"stub_addr={self._alloc_vt:#x}")
             if current_vt not in (0, 1_000_000) and not (current_vt > 0x10000):
                 print(f"[DataExtractor]   ⚠ VT={current_vt} is unexpectedly small — "
                        "expected exactly 1,000,000 in menus or a large counter in-race.")
@@ -1665,7 +1662,6 @@ class DataExtractor:
         if self._prev_vt == 0 and 0 < current_vt < 1_000_000:
             print(f"[DataExtractor] ✓ Race started (VT: 0 → {current_vt}) — "
                   "starting freeze-capture cycle…")
-        if self._prev_vt == 0 and 0 < current_vt < 1_000_000:
             self._direct_mode  = False
             self._rdi_progress = None
             self._rdi_dash     = None

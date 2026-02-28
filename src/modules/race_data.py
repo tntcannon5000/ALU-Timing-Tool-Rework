@@ -6,7 +6,6 @@ This module handles saving and loading race ghost data for timing comparisons.
 
 import json
 import os
-from posixpath import split
 import numpy as np
 from typing import Dict, Optional, List
 
@@ -212,7 +211,6 @@ class RaceDataManager:
             self.splits = data['splits'] if 'splits' in data else None
             self.is_split_loaded = self.split_progress is not None and self.split_times is not None
             self.ghost_splits =  self.get_ghost_splits()
-            #self.ghost_filename = os.path.splitext(os.path.basename(filepath))[0]
             self.ghost_filename = filepath
             if self.ghost_splits is not None:
                 self.new_split_available = True
@@ -228,15 +226,12 @@ class RaceDataManager:
         """
         try:
             ghost_split_times = []
-            #ghost_split_times.append(self.split_times[np.where(self.split_progress == self.splits[0][1])[0][0]])
             ghost_split_times.append(int(self.split_times[self.split_progress == self.splits[0][1]][0]))
             print(self.splits)
             print("First ghost split time:", ghost_split_times[0])
             for i in range(len(self.splits)-1):
                 prev = self.splits[i]
                 current = self.splits[i+1]
-                #timestart = self.split_times[np.where(self.split_progress == prev[1])[0][0]]
-                #timeend = self.split_times[np.where(self.split_progress == current[1])[0][0]]
                 timestart = int(self.split_times[self.split_progress == prev[1]][0])
                 timeend = int(self.split_times[self.split_progress == current[1]][0])
                 ghost_split_times.append(timeend - timestart)
@@ -282,7 +277,6 @@ class RaceDataManager:
         else:
             prog_end = self.split_progress[(self.split_progress > new_split)]
             times_end = self.split_times[(self.split_progress > new_split)]
-            #offset = times_middle[len(prog_middle)-1] - self.split_times[np.where(self.split_progress == self.splits[self.next_split_index][1])[0][0]]
             offset = times_middle[len(times_middle)-1] - self.split_times[(self.split_progress == new_split)][0]
             times_end = np.add(times_end, offset)
             if self.split_velocities is not None:

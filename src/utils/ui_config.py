@@ -124,9 +124,6 @@ class UIConfigManager:
                     monitors_info = []
                     
                     def monitor_enum_proc(hMonitor, hdcMonitor, lprcMonitor, dwData):
-                        monitor_info = wintypes.RECT()
-                        ctypes.windll.user32.GetMonitorInfoW(hMonitor, ctypes.byref(monitor_info))
-                        
                         monitors_info.append({
                             'left': lprcMonitor.contents.left,
                             'top': lprcMonitor.contents.top,

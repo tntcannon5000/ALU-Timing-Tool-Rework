@@ -1,6 +1,6 @@
-"""Modules for ALU Timing Tool (v5 — CE Backend)
+"""Modules for ALU Timing Tool (v5 — pymem Backend)
 
-Core modules for the Cheat Engine-based timing tool.
+Core modules for the direct-memory timing tool.
 All legacy v4 OCR/CNN/capture code has been removed.
 """
 
@@ -11,6 +11,5 @@ from .data_extractor import DataExtractor
 __all__ = [
     'TimingToolUI',
     'RaceDataManager',
-    'CheatEngineClient',
     'DataExtractor',
 ]

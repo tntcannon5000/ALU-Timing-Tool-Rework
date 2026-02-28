@@ -1,12 +1,13 @@
 """
-Main entry point for the ALU Timing Tool (CE Backend).
+Main entry point for the ALU Timing Tool (pymem Backend).
 
-This script initializes and runs the ALU Timing Tool application,
-receiving game telemetry from Cheat Engine via a shared temp file.
+This script initializes and runs the ALU Timing Tool application.
+Game telemetry is read by directly hooking Asphalt 9 process memory
+via DataExtractor — no Cheat Engine required.
 
 Prerequisites:
-  1. ALU_Trainer_v2.CT open in Cheat Engine (auto-attaches to Asphalt 9)
-     OR: ALU_Trainer_v2.exe trainer running
+  1. Asphalt 9 (Steam x64) running
+  2. Run this script — it attaches to the process automatically
 """
 
 import sys
@@ -26,15 +27,14 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     
     try:
-        print("Initializing ALU Timing Tool (CE Backend)...")
+        print("Initializing ALU Timing Tool (pymem Backend)...")
         print("=" * 50)
-        
-        # Initialize the application — reads CE bridge file
+
         app = ALUTimingTool()
-        
+
         print("=" * 50)
         print("ALU Timing Tool initialized successfully!")
-        print("Reading game telemetry from CE bridge file.")
+        print("Reading game telemetry via direct process memory hooks.")
         print("Press Ctrl+C to stop the application.")
         print("=" * 50)
         

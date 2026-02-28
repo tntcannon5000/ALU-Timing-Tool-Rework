@@ -15,6 +15,7 @@ Prerequisites:
   2. Run this app — it attaches to the process automatically
 """
 
+import os
 import time as systime
 import threading
 from collections import deque
@@ -59,11 +60,12 @@ class ALUTimingTool:
 
         # VT false-positive handling: the game sometimes pulses VT=0 briefly
         # before the real countdown, then returns to 1000000 for a moment.
-        # Strategy: show overlays IMMEDIATELY on "starting" (as before), but
-        # debounce the HIDE when "starting" reverts to "menus".  If the true
-        # countdown follows within HIDE_DEBOUNCE_S seconds, cancel the pending
-        # hide so overlays stay on continuously — no stutter, no late load.
-        self._pending_hide_start: Optional[float] = None  # perf_counter when hide was deferred
+        # A 5-second clock arms the moment "starting" is first detected.
+        # Any "menus" transition that arrives while the clock is still running
+        # is ignored for overlay purposes — all race displays stay visible.
+        # Only after the clock expires AND the game is still in "menus" do we
+        # tear down the overlays.  Seeing "starting" again resets the clock.
+        self._last_starting_ts: Optional[float] = None  # perf_counter() of last "starting" detection; None = not armed
         self._starting_display_shown: bool = False
 
         # Timer & progress
@@ -124,18 +126,11 @@ class ALUTimingTool:
     def _on_load_split(self, filepath: str):
         success = self.race_data_manager.load_ghost_data(filepath)
         if success:
-            filename = self.race_data_manager.get_ghost_filename()
-            self.ui.update_ghost_filename(filename)
-            print(f"Loaded split ghost: {filename}")
-            try:
-                self.ui.update_split_view()
-            except Exception:
-                pass
-            try:
-                if hasattr(self.ui, "splits_checkbox") and self.ui.splits_checkbox:
-                    self.ui.splits_checkbox.config(state="normal")
-            except Exception:
-                pass
+            display_name = os.path.basename(filepath)
+            self.ui.update_ghost_filename(display_name)
+            print(f"Loaded split ghost: {display_name}")
+            self.ui.update_splits_checkbox_state()
+            self.ui.show_splits_if_enabled()
         else:
             self.ui.show_message("Error", "Failed to load split file.", is_error=True)
 
@@ -143,18 +138,18 @@ class ALUTimingTool:
         if normalized_splits and isinstance(normalized_splits, list):
             if hasattr(self.race_data_manager, "splits"):
                 self.race_data_manager.splits = normalized_splits
-                try:
-                    self.ui.update_split_view()
-                except Exception:
-                    pass
+            self.ui.update_splits_checkbox_state()
+            self.ui.show_splits_if_enabled()
             print(f"Configured {len(normalized_splits)} splits")
 
     def _on_load_ghost(self, filepath: str):
         success = self.race_data_manager.load_ghost_data(filepath)
         if success:
-            filename = self.race_data_manager.get_ghost_filename()
-            self.ui.update_ghost_filename(filename)
-            print(f"Loaded ghost: {filename}")
+            display_name = os.path.basename(filepath)
+            self.ui.update_ghost_filename(display_name)
+            print(f"Loaded ghost: {display_name}")
+            self.ui.update_splits_checkbox_state()
+            self.ui.show_splits_if_enabled()
         else:
             self.ui.show_message("Error", "Failed to load ghost file.", is_error=True)
 
@@ -166,10 +161,22 @@ class ALUTimingTool:
             self.ui.show_message("Error", "Failed to save race data.", is_error=True)
 
     def _on_save_ghost(self, filepath: str):
+        # Capture current loaded ghost name BEFORE saving.
+        prev_ghost_name = self.ui._current_ghost_name
         success = self.race_data_manager.save_race_data(filepath.replace(".json", ""))
         if success:
             self.ui.show_ghost_saved_message()
             print(f"Saved ghost: {filepath}")
+            # If the user overwrote the currently loaded ghost, auto-reload it
+            # so the ghost data reflects the just-saved race.  Do NOT show the
+            # split panel on auto-reload (the user didn't explicitly load it).
+            if prev_ghost_name and os.path.splitext(os.path.basename(filepath))[0] == os.path.splitext(prev_ghost_name)[0]:
+                reload_ok = self.race_data_manager.load_ghost_data(filepath)
+                if reload_ok:
+                    display_name = os.path.basename(filepath)
+                    self.ui.update_ghost_filename(display_name)
+                    self.ui.update_splits_checkbox_state()
+                    print(f"Auto-reloaded updated ghost: {display_name}")
         else:
             self.ui.show_message("Error", "Failed to save ghost file.", is_error=True)
 
@@ -198,9 +205,6 @@ class ALUTimingTool:
         if self.init:
             self.init = False
             print("Initial memory state observed — exiting init phase")
-
-    def is_init(self) -> bool:
-        return self.init
 
     # ------------------------------------------------------------------
     # Timer formatting
@@ -234,7 +238,7 @@ class ALUTimingTool:
     # ------------------------------------------------------------------
 
     RACE_ENDED_THRESHOLD_US = 250000  # µs divergence before we confirm race ended
-    HIDE_DEBOUNCE_S = 0.5             # seconds to wait before hiding overlays after a starting→menus transition
+    HIDE_DEBOUNCE_S = 5             # seconds to wait before hiding overlays after a starting→menus transition
 
     @staticmethod
     def _detect_race_state(
@@ -354,7 +358,7 @@ class ALUTimingTool:
         self.current_timer_us = 0
         self.percentage = "0%"
         self.last_delta_s = None
-        self._pending_hide_start = None
+        self._last_starting_ts = None
         self._starting_display_shown = False
         self.race_data_manager.reset_race_data()
         self.ui.update_save_ghost_button_state()
@@ -444,7 +448,6 @@ class ALUTimingTool:
                 # Sleep briefly to avoid busy-spinning, then skip this tick.
                 systime.sleep(0.001)
                 continue
-            #print(f"[DEBUG] Memory read: {vals}")  # Debug log for each memory read
             self.total_loops += 1
 
             timer_raw_us   = vals["timer_raw"]
@@ -485,8 +488,8 @@ class ALUTimingTool:
                 self.race_in_progress = True
                 self.ui.update_delta("=0.000")
                 self.ui.update_background_color("Race vs Ghost", 0)
-                # Cancel any pending hide (false positive resolved — we’re racing).
-                self._pending_hide_start = None
+                # Clear debounce clock — we're genuinely racing now.
+                self._last_starting_ts = None
                 # Fallback: if begin_race_display was never called (e.g. game
                 # skipped "starting" entirely and jumped straight to racing),
                 # fire it now so overlays are guaranteed visible.
@@ -507,28 +510,26 @@ class ALUTimingTool:
                 if not self.race_completed and self.race_in_progress:
                     print("Game state: Race Ended")
                     self._handle_race_completion()
-                # Hide overlays on race end
+                # Hide motion overlays on race end; split view stays until menus.
                 self.ui.update_gear_rpm(0, 0, False)
                 self.ui.update_velocity(0.0, False)
                 self.ui.update_steering(0.0, False)
                 self.ui.update_vdelta(0.0, None, False)
-                self.ui.auto_hide_race_overlays()
-                self.ui.schedule_split_view_reset()
+                self.ui.restore_race_panel()
             elif game_state == "ended_pl" and prev_game_state == "racing_pl":
                 if not self.race_completed and self.race_in_progress:
                     print("Game state: Race Ended")
                     self._handle_race_completion(True)
-                # Hide overlays on race end
+                # Hide motion overlays on race end; split view stays until menus.
                 self.ui.update_gear_rpm(0, 0, False)
                 self.ui.update_velocity(0.0, False)
                 self.ui.update_steering(0.0, False)
                 self.ui.update_vdelta(0.0, None, False)
-                self.ui.auto_hide_race_overlays()
-                self.ui.schedule_split_view_reset()
+                self.ui.restore_race_panel()
 
             if game_state == "starting" and prev_game_state != "starting":
-                # Cancel any pending hide from a prior false positive.
-                self._pending_hide_start = None
+                # (Re-)arm the debounce clock — 5 s grace period starts now.
+                self._last_starting_ts = systime.perf_counter()
                 self._starting_display_shown = True
                 self.starting = True
                 print("Countdown started - Loading Race GUI")
@@ -555,37 +556,47 @@ class ALUTimingTool:
                     self.current_timer_display = "Quit Race"
                     self.ui.update_delta("−−.−−−")
                     self.race_in_progress = False
+                    self.race_data_manager.reset_race_data()
                 elif self.race_in_progress and not self.init:
                     self.race_in_progress = False
                     print("Returned to menus after race completion")
+                    self.race_data_manager.reset_race_data()
                 elif self.init:
                     print("Initial state: Menus")
                     self.current_timer_display = "00:00.000"
                     self.ui.update_delta("−−.−−−")
                     self.reset_race_state()
-                # Hide overlay calls & cleanup
-                self.ui.update_gear_rpm(0, 0, False)
-                self.ui.update_velocity(0.0, False)
-                self.ui.update_steering(0.0, False)
-                self.ui.update_vdelta(0.0, None, False)
-                if prev_game_state == "starting":
-                    # Could be a false positive — defer the hide so a rapidly
-                    # following true countdown can cancel it without a stutter.
-                    self._pending_hide_start = systime.perf_counter()
-                else:
-                    # Genuine return to menus after racing/ended.
+                # If the debounce clock is still running ("starting" was seen
+                # recently), leave all overlays up.  The flush block below will
+                # tear them down once the 5-second grace period expires.
+                _in_debounce = (
+                    self._last_starting_ts is not None
+                    and systime.perf_counter() - self._last_starting_ts < self.HIDE_DEBOUNCE_S
+                )
+                if not _in_debounce:
+                    self.ui.update_gear_rpm(0, 0, False)
+                    self.ui.update_velocity(0.0, False)
+                    self.ui.update_steering(0.0, False)
+                    self.ui.update_vdelta(0.0, None, False)
                     self.ui.auto_hide_race_overlays()
                     self.ui.schedule_split_view_reset()
+                    self._last_starting_ts = None
                 self._prev_timer_us = 0
                 self._prev_progress = 0
                 self.current_timer_us = 0
                 self.percentage = "0%"
                 self.last_captured_timer_us = 0
 
-            # Flush a pending hide if enough time has passed and we’re still in menus.
-            if self._pending_hide_start is not None and game_state == "menus":
-                if systime.perf_counter() - self._pending_hide_start >= self.HIDE_DEBOUNCE_S:
-                    self._pending_hide_start = None
+            # Flush: if the 5-second grace has elapsed while still in menus,
+            # tear down all overlays now.
+            if self._last_starting_ts is not None and game_state == "menus":
+                if systime.perf_counter() - self._last_starting_ts >= self.HIDE_DEBOUNCE_S:
+                    self._last_starting_ts = None
+                    self.race_data_manager.reset_race_data()
+                    self.ui.update_gear_rpm(0, 0, False)
+                    self.ui.update_velocity(0.0, False)
+                    self.ui.update_steering(0.0, False)
+                    self.ui.update_vdelta(0.0, None, False)
                     self.ui.auto_hide_race_overlays()
                     self.ui.schedule_split_view_reset()
             prev_game_state = game_state
@@ -638,8 +649,13 @@ class ALUTimingTool:
 
             # -- Throttled UI updates ----------------------------------
             now = systime.time()
-            # Overlays visible during countdown and while actively racing
-            should_show_overlays = game_state in ("racing_pl", "racing_sp") or self.starting
+            # Overlays visible during countdown, while racing, or while the
+            # 5-second false-positive debounce clock is still running.
+            should_show_overlays = (
+                game_state in ("racing_pl", "racing_sp")
+                or self.starting
+                or self._last_starting_ts is not None
+            )
             if physics_update or (now - self.last_ui_update >= self.ui_update_interval):
                 self.ui.update_timer(self.current_timer_display)
                 if self.race_data_manager.is_new_split_available():
@@ -655,7 +671,7 @@ class ALUTimingTool:
                     ghost_vel_raw = self.race_data_manager.get_ghost_velocity_at_progress(progress_raw)
                 self.ui.update_vdelta(
                     velocity_raw, ghost_vel_raw, should_show_overlays,
-                    ghost_loaded=ghost_loaded and actively_racing,
+                    ghost_loaded=ghost_loaded and should_show_overlays,
                     delta_s=self.last_delta_s,
                     current_timer_us=timer_raw_us,
                 )
@@ -666,26 +682,6 @@ class ALUTimingTool:
             self.loop_times.append(elapsed_ms)
             self.avg_loop_time = sum(self.loop_times) / len(self.loop_times)
             self.ui.update_loop_time(elapsed_ms, self.avg_loop_time)
-
-    # ------------------------------------------------------------------
-    # Stats
-    # ------------------------------------------------------------------
-
-    def get_stats(self) -> dict:
-        stats = {
-            "total_loops": self.total_loops,
-            "avg_loop_time": self.avg_loop_time,
-            "current_percentage": self.percentage,
-            "current_timer": self.current_timer_display,
-            "timer_us": self.current_timer_us,
-            "race_in_progress": self.race_in_progress,
-            "race_completed": self.race_completed,
-            "race_mode": self.ui.get_current_mode() if self.ui else "Record Ghost",
-            "ghost_loaded": self.race_data_manager.is_ghost_loaded(),
-            "ghost_filename": self.race_data_manager.get_ghost_filename(),
-        }
-        stats.update(self.de_client.get_stats())
-        return stats
 
 
 if __name__ == "__main__":
