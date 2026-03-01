@@ -24,7 +24,7 @@ class TimingToolUI:
     def __init__(self, race_data_manager=None):
         """Initialize the UI."""
         self.root = None
-        self.is_pinned = True
+        self.is_pinned = False
         self.start_x = 0
         self.start_y = 0
         self.debug_expanded = False
@@ -152,10 +152,33 @@ class TimingToolUI:
         # Panel states from config
         self.race_panel_expanded = False  # Always opened on startup (create_ui calls toggle_race_panel)
         self.debug_expanded = self.ui_config.get("panels", {}).get("debug_panel_expanded", False)
-        self.is_pinned = self.ui_config.get("is_pinned", True)
+        self.is_pinned = self.ui_config.get("is_pinned", False)
 
         # Loaded ghost name (basename, e.g. "911_v2.json") — used as save-dialog default
         self._current_ghost_name: str = ""
+
+        # Dual monitor mode — race panel + split view live in a separate draggable window
+        self.dual_monitor: bool = self.ui_config.get("dual_monitor", False)
+        self.dual_win: tk.Toplevel | None = None
+        self.dual_monitor_var: tk.BooleanVar | None = None
+        self._dual_start_x: int = 0
+        self._dual_start_y: int = 0
+        self.dual_scaling: float = float(self.ui_config.get("dual_scaling", self.ui_config.get("scaling", 1.15)))
+        self.dual_scaling_slider: tk.Scale | None = None
+        self.dual_scaling_slider_var: tk.DoubleVar | None = None
+        self._dual_scaling_after_id: str | None = None
+
+        # Scaling slider state
+        self.scaling_slider: tk.Scale | None = None
+        self.scaling_slider_var: tk.DoubleVar | None = None
+        self._scaling_after_id: str | None = None
+        self.scale_row: tk.Frame | None = None       # Scale-1 slider row (hidden when pinned)
+        self.dm_scale_row: tk.Frame | None = None    # Scale-2 slider row (hidden when pinned)
+
+        # Temporarily set during a DM-mode panel rebuild so _create_race_panel_content
+        # can correctly initialise the Scale-1 slider (current_scaling is swapped to
+        # dual_scaling during those calls; this preserves the real main-window value).
+        self._dm_build_main_scaling: float | None = None
 
     # ──────────────────────────────────────────────────────────────────────
     #  Configuration persistence
@@ -179,6 +202,10 @@ class TimingToolUI:
                     "steering_enabled": self.steering_enabled,
                     "splits_enabled": self.split_view_var.get() if self.split_view_var else self.split_view_enabled,
                     "vdelta_enabled": self.vdelta_enabled,
+                    "dual_monitor": self.dual_monitor,
+                    "dual_scaling": self.dual_scaling,
+                    "dual_win_x": (self.dual_win.winfo_x() if self.dual_win else self.ui_config.get("dual_win_x", None)),
+                    "dual_win_y": (self.dual_win.winfo_y() if self.dual_win else self.ui_config.get("dual_win_y", None)),
                     "panels": {
                         "race_panel_expanded": self.race_panel_expanded,
                         "debug_panel_expanded": self.debug_expanded,
@@ -207,6 +234,26 @@ class TimingToolUI:
         #    self.root.wm_attributes("-topmost", False)
             self.pin_button.config(text="●", bg="#4ecdc4")
 
+        # Show/hide scaling sliders based on pin state.
+        if self.scale_row:
+            if self.is_pinned:
+                self.scale_row.pack_forget()
+            else:
+                self.scale_row.pack(fill="x")
+        if self.dm_scale_row:
+            if self.is_pinned:
+                self.dm_scale_row.pack_forget()
+            else:
+                self.dm_scale_row.pack(fill="x")
+
+        # Refit both windows after the row appears/disappears.
+        self._auto_resize()
+        if self.dual_win:
+            try:
+                self.dual_win.update_idletasks()
+            except Exception:
+                pass
+
     def _auto_resize(self):
         """Let Tk compute natural window height based on packed content."""
         if self._batch_show:
@@ -219,7 +266,9 @@ class TimingToolUI:
         self.root.geometry(f"{width}x{req_h}+{x}+{y}")
 
     def toggle_race_panel(self, _event=None):
-        """Toggle race panel visibility."""
+        """Toggle race panel visibility (no-op in dual monitor mode)."""
+        if self.dual_monitor:
+            return  # race panel always visible in dual monitor mode
         self.race_panel_expanded = not self.race_panel_expanded
         if self.race_panel_expanded:
             self.race_panel.pack(side="top", fill="x", padx=0, pady=0)
@@ -258,49 +307,7 @@ class TimingToolUI:
     # ──────────────────────────────────────────────────────────────────────
 
     def on_mode_changed(self, event=None):
-        """Handle mode change."""
-        mode = self.mode_var.get()
-        py = int(8 * self.current_scaling)
-
-        if mode == "Record Ghost":
-            # Swap slot button: show Configure Splits, hide Load Race Ghost
-            self.race_data_manager.is_split_loaded = False
-            if self.load_ghost_button:
-                self.load_ghost_button.pack_forget()
-            if self.configure_splits_button and self.save_ghost_button:
-                self.configure_splits_button.pack(fill="x", pady=(0, py),
-                                                  before=self.save_ghost_button)
-            
-        else:  # race mode
-            # Swap slot button: show Load Race Ghost, hide Configure Splits
-            self.race_data_manager.is_split_loaded = self.race_data_manager.ghost_splits is not None
-            if self.configure_splits_button:
-                self.configure_splits_button.pack_forget()
-            if self.load_ghost_button and self.save_ghost_button:
-                self.load_ghost_button.pack(fill="x", pady=(0, py),
-                                            before=self.save_ghost_button)
-            # Restore ghost name display if still showing placeholder
-            if self.ghost_filename_label:
-                try:
-                    if self.ghost_filename_label.cget("text") == "ALU Timer v5.0":
-                        self.ghost_filename_label.config(text="No ghost loaded", fg="#e74c3c")
-                except tk.TclError:
-                    pass
-
-        if self.splits_checkbox:
-            if self.race_data_manager and getattr(self.race_data_manager, 'splits', None):
-                self.splits_checkbox.config(state="normal")
-            else:
-                self.splits_checkbox.config(state="disabled")
-
-        if self.vdelta_checkbox:
-            if mode == "Record Ghost":
-                self.vdelta_checkbox.config(state="disabled")
-            else:
-                self.vdelta_checkbox.config(state="normal")
-
-        if self.on_mode_change:
-            self.on_mode_change(mode)
+        """Legacy mode-change handler — mode selector removed; kept for compatibility."""
 
     def on_vel_mode_changed(self, event=None):
         """Handle velocity mode dropdown change."""
@@ -338,12 +345,15 @@ class TimingToolUI:
         Checking the box saves the preference for when the next race starts
         (begin_race_display picks it up).  If splits are loaded and the panel
         is hidden, it is shown immediately.  Unchecking hides the panel.
+        In dual monitor mode the split view is always visible — never hidden.
         """
         want = self.split_view_var.get() if self.split_view_var else False
+        # Keep the instance variable in sync so it survives a scaling rebuild.
+        self.split_view_enabled = want
         if want:
             if not self.split_view_visible:
                 self.show_splits_if_enabled()
-        elif self.split_view_visible:
+        elif self.split_view_visible and not self.dual_monitor:
             self.toggle_split_view()
 
     @staticmethod
@@ -371,6 +381,52 @@ class TimingToolUI:
             )
             if filename:
                 self.on_load_ghost(filename)
+
+    def unload_ghost_action(self):
+        """Unload the current ghost and clear ALL associated data."""
+        if self.race_data_manager:
+            self.race_data_manager.unload_ghost()
+        # Clear the displayed name and update button states
+        self.update_ghost_filename("")
+        self.update_splits_checkbox_state()
+        # Hide split view if open
+        if self.split_view_visible:
+            self.toggle_split_view()
+        print("Ghost unloaded")
+
+    def update_ghost_loaded_ui_state(self):
+        """Sync Load/Unload button, Split Config/Rename Splits, and V-delta state
+        to the current ghost-loaded condition."""
+        ghost_loaded = (self.race_data_manager is not None
+                        and self.race_data_manager.is_ghost_loaded())
+
+        if self.load_ghost_button:
+            try:
+                if self.load_ghost_button.winfo_exists():
+                    if ghost_loaded:
+                        self.load_ghost_button.config(
+                            text="Unload Ghost", command=self.unload_ghost_action)
+                    else:
+                        self.load_ghost_button.config(
+                            text="Load Ghost", command=self.load_ghost_file)
+            except tk.TclError:
+                pass
+
+        if self.configure_splits_button:
+            try:
+                if self.configure_splits_button.winfo_exists():
+                    self.configure_splits_button.config(
+                        text="Rename Splits" if ghost_loaded else "Split Config")
+            except tk.TclError:
+                pass
+
+        if self.vdelta_checkbox:
+            try:
+                if self.vdelta_checkbox.winfo_exists():
+                    self.vdelta_checkbox.config(
+                        state="normal" if ghost_loaded else "disabled")
+            except tk.TclError:
+                pass
 
     def load_split_file(self):
         """Open file dialog to load a split-type ghost file."""
@@ -419,6 +475,8 @@ class TimingToolUI:
                     self.ghost_filename_label.config(text="No ghost loaded", fg="#e74c3c")
             except tk.TclError:
                 pass
+        # Keep Load/Unload button and Split Config/Rename button in sync
+        self.update_ghost_loaded_ui_state()
 
     def show_ghost_saved_message(self):
         """Show temporary 'Ghost Saved!' message."""
@@ -429,7 +487,7 @@ class TimingToolUI:
                 original_text = self.ghost_filename_label.cget("text")
                 original_color = self.ghost_filename_label.cget("fg")
                 self.ghost_filename_label.config(text="Ghost Saved!", fg="#2ecc71",
-                                                 font=("Helvetica", 9, "bold underline"))
+                                                 font=("Helvetica", 12, "bold underline"))
             except tk.TclError:
                 return
 
@@ -438,7 +496,7 @@ class TimingToolUI:
                     try:
                         if self.ghost_filename_label.winfo_exists():
                             self.ghost_filename_label.config(text=original_text, fg=original_color,
-                                                             font=("Helvetica", 9))
+                                                             font=("Helvetica", 12))
                     except tk.TclError:
                         pass
 
@@ -482,9 +540,12 @@ class TimingToolUI:
     # ──────────────────────────────────────────────────────────────────────
 
     def open_configure_splits_dialog(self):
-        """Open a dialog allowing the user to configure split names and percentages."""
+        """Open a dialog to configure split names (and percentages when no ghost loaded)."""
+        ghost_loaded = (self.race_data_manager is not None
+                        and self.race_data_manager.is_ghost_loaded())
+
         dialog = tk.Toplevel(self.root)
-        dialog.title("Configure Splits")
+        dialog.title("Rename Splits" if ghost_loaded else "Configure Splits")
         dialog.geometry("800x675")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -493,45 +554,157 @@ class TimingToolUI:
         _font = ("Helvetica", 20)
         _font_bold = ("Helvetica", 20, "bold")
 
-        tk.Label(dialog, text="Number of splits (2-10):", bg="#000000", fg="white", font=_font).pack(pady=(16, 8))
+        # ── "Load from another ghost" button (always at top) ──
+        def load_from_another_ghost():
+            runs_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
+            os.makedirs(runs_dir, exist_ok=True)
+            src = filedialog.askopenfilename(
+                title="Load Split Config From Ghost",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+                initialdir=runs_dir,
+                initialfile=self._get_most_recent_json(runs_dir),
+                parent=dialog,
+            )
+            if not src:
+                return
+            try:
+                import json as _json
+                with open(src, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+                src_splits = data.get("splits", [])
+                if not src_splits:
+                    messagebox.showerror("Error", "No splits found in selected file", parent=dialog)
+                    return
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read file:\n{e}", parent=dialog)
+                return
+
+            if ghost_loaded:
+                # Rename mode: only copy names, keep existing percents locked
+                for i, (name_var, _pct_var) in enumerate(entry_widgets):
+                    if i < len(src_splits):
+                        row = src_splits[i]
+                        name_var.set(row[0] if isinstance(row, (list, tuple)) else str(row))
+            else:
+                # Config mode: load full config (names + percents)
+                n_src = max(2, min(10, len(src_splits)))
+                count_var.set(n_src)
+                build_rows()
+                for i, (name_var, pct_var) in enumerate(entry_widgets):
+                    if i < len(src_splits):
+                        row = src_splits[i]
+                        name_val = row[0] if isinstance(row, (list, tuple)) and len(row) > 0 else str(row)
+                        raw_pct  = row[1] if isinstance(row, (list, tuple)) and len(row) > 1 else (i + 1) / n_src
+                        pct_int  = int(round(raw_pct * 100)) if isinstance(raw_pct, float) and raw_pct <= 1.0 else int(raw_pct)
+                        name_var.set(name_val)
+                        if i < n_src - 1:
+                            pct_var.set(pct_int)
+
+        tk.Button(
+            dialog, text="Load split config from another ghost",
+            command=load_from_another_ghost,
+            bg="#2980b9", fg="white", font=_font_bold,
+            relief="flat",
+        ).pack(fill="x", padx=16, pady=(16, 4))
+
+        # ── Count spinbox (hidden in rename/ghost-loaded mode) ──
+        count_frame = tk.Frame(dialog, bg="#000000")
         initial_count = 2
         if self.race_data_manager and getattr(self.race_data_manager, 'splits', None):
             initial_count = len(self.race_data_manager.splits)
         count_var = tk.IntVar(value=initial_count)
-        count_spin = tk.Spinbox(dialog, from_=2, to=10, textvariable=count_var, width=5, font=_font)
-        count_spin.pack(pady=(0, 12))
+        if not ghost_loaded:
+            count_frame.pack(pady=(8, 0))
+            tk.Label(count_frame, text="Number of splits (2-10):",
+                     bg="#000000", fg="white", font=_font).pack(pady=(0, 8))
+            tk.Spinbox(count_frame, from_=2, to=10,
+                       textvariable=count_var, width=5, font=_font).pack(pady=(0, 12))
 
         rows_frame = tk.Frame(dialog, bg="#000000")
         rows_frame.pack(fill="both", expand=True, padx=16, pady=8)
 
         entry_widgets = []
 
-        def build_rows():
+        def build_rows(current_rows=None):
+            """Rebuild the split rows.
+
+            current_rows: list of [name_str, pct_int] capturing the live UI
+                          state.  None means first build — read from the
+                          race_data_manager (or defaults).
+            """
             for w in rows_frame.winfo_children():
                 w.destroy()
             entry_widgets.clear()
 
-            n = max(2, min(10, int(count_var.get())))
-            existing = []
-            if self.race_data_manager and getattr(self.race_data_manager, 'splits', None):
-                existing = self.race_data_manager.splits
-
-            for i in range(n):
-                frame = tk.Frame(rows_frame, bg="#000000")
-                frame.pack(fill="x", pady=4)
-                tk.Label(frame, text=f"Split {i+1} name:", bg="#000000", fg="white", font=_font).pack(side="left")
-                name_var = tk.StringVar(value=(existing[i][0] if i < len(existing) else f"split_{i+1}"))
-                name_entry = tk.Entry(frame, textvariable=name_var, width=18, font=_font)
-                name_entry.pack(side="left", padx=12)
-                tk.Label(frame, text="Percent:", bg="#000000", fg="white", font=_font).pack(side="left")
-                if i == n - 1:
-                    percent_var = tk.IntVar(value=100)
-                    tk.Label(frame, text="End", bg="#000000", fg="#ecf0f1", width=5, font=_font).pack(side="left", padx=12)
+            # Build a normalised source list: [[name_str, pct_int], ...]
+            if current_rows is None:
+                raw_existing = []
+                if self.race_data_manager and getattr(self.race_data_manager, 'splits', None):
+                    raw_existing = self.race_data_manager.splits
+                if ghost_loaded:
+                    n = len(raw_existing) if raw_existing else initial_count
                 else:
-                    default_percent = (existing[i][1] if i < len(existing) else int(((i+1)/n)*100))
-                    percent_var = tk.IntVar(value=default_percent)
-                    tk.Spinbox(frame, from_=1, to=98, textvariable=percent_var, width=5, font=_font).pack(side="left", padx=12)
-                entry_widgets.append((name_var, percent_var))
+                    n = max(2, min(10, int(count_var.get())))
+                source = []
+                for i in range(n):
+                    if i < len(raw_existing):
+                        raw_pct = raw_existing[i][1]
+                        pct_int = (int(round(raw_pct * 100))
+                                   if isinstance(raw_pct, float) and raw_pct <= 1.0
+                                   else int(raw_pct))
+                        source.append([raw_existing[i][0], pct_int])
+                    else:
+                        source.append([f"split_{i+1}", int((i + 1) / n * 100)])
+            else:
+                source = current_rows
+
+            n = len(source)
+
+            if ghost_loaded:
+                # Count fixed; percents locked (disabled Entry)
+                for i in range(n):
+                    frame = tk.Frame(rows_frame, bg="#000000")
+                    frame.pack(fill="x", pady=4)
+                    tk.Label(frame, text=f"Split {i+1} name:",
+                             bg="#000000", fg="white", font=_font).pack(side="left")
+                    name_var = tk.StringVar(value=source[i][0])
+                    tk.Entry(frame, textvariable=name_var, width=18,
+                             font=_font).pack(side="left", padx=12)
+                    tk.Label(frame, text="Percent:", bg="#000000", fg="white",
+                             font=_font).pack(side="left")
+                    if i == n - 1:
+                        pct_var = tk.IntVar(value=100)
+                        tk.Label(frame, text="End", bg="#000000", fg="#ecf0f1",
+                                 width=5, font=_font).pack(side="left", padx=12)
+                    else:
+                        pct_var = tk.IntVar(value=source[i][1])
+                        tk.Entry(frame, textvariable=pct_var, width=5, font=_font,
+                                 state="disabled",
+                                 disabledforeground="#95a5a6",
+                                 disabledbackground="#1a1a1a").pack(side="left", padx=12)
+                    entry_widgets.append((name_var, pct_var))
+            else:
+                # Normal config mode: editable Spinbox percents
+                for i in range(n):
+                    frame = tk.Frame(rows_frame, bg="#000000")
+                    frame.pack(fill="x", pady=4)
+                    tk.Label(frame, text=f"Split {i+1} name:",
+                             bg="#000000", fg="white", font=_font).pack(side="left")
+                    name_var = tk.StringVar(value=source[i][0])
+                    tk.Entry(frame, textvariable=name_var, width=18,
+                             font=_font).pack(side="left", padx=12)
+                    tk.Label(frame, text="Percent:", bg="#000000", fg="white",
+                             font=_font).pack(side="left")
+                    if i == n - 1:
+                        pct_var = tk.IntVar(value=100)
+                        tk.Label(frame, text="End", bg="#000000", fg="#ecf0f1",
+                                 width=5, font=_font).pack(side="left", padx=12)
+                    else:
+                        pct_var = tk.IntVar(value=source[i][1])
+                        tk.Spinbox(frame, from_=1, to=98, textvariable=pct_var,
+                                   width=5, font=_font).pack(side="left", padx=12)
+                    entry_widgets.append((name_var, pct_var))
 
         def on_count_change(*_args):
             try:
@@ -541,9 +714,25 @@ class TimingToolUI:
                 count_var.set(2)
             v = max(2, min(10, v))
             count_var.set(v)
-            build_rows()
+            # Snapshot current UI state so edits survive the rebuild.
+            if entry_widgets:
+                current = [[nv.get(), pv.get()] for nv, pv in entry_widgets]
+                new_n = v
+                # Add rows before the last (End) row.
+                while len(current) < new_n:
+                    insert_pos = len(current) - 1
+                    prev_pct = current[insert_pos - 1][1] if insert_pos > 0 else 1
+                    new_pct = max(prev_pct + 1, min(99, (prev_pct + 100) // 2))
+                    current.insert(insert_pos, [f"split_{insert_pos + 1}", new_pct])
+                # Remove rows from before the last (End) row.
+                while len(current) > new_n:
+                    del current[-2]
+                build_rows(current)
+            else:
+                build_rows()
 
-        count_var.trace_add('write', lambda *_: on_count_change())
+        if not ghost_loaded:
+            count_var.trace_add('write', lambda *_: on_count_change())
         build_rows()
 
         btn_frame = tk.Frame(dialog, bg="#000000")
@@ -557,22 +746,22 @@ class TimingToolUI:
                     percent = percent_var.get() / 100.0
                     splits_list.append([name, percent])
             except Exception:
-                messagebox.showerror("Error", "Invalid split values")
+                messagebox.showerror("Error", "Invalid split values", parent=dialog)
                 return
 
             if not (2 <= len(splits_list) <= 10):
-                messagebox.showerror("Error", "Splits count must be between 2 and 10")
+                messagebox.showerror("Error", "Splits count must be between 2 and 10", parent=dialog)
                 return
             if splits_list[-1][1] != 1.0:
-                messagebox.showerror("Error", "Last split percent must be 100%")
+                messagebox.showerror("Error", "Last split percent must be 100%", parent=dialog)
                 return
 
             percents = [p for (_, p) in splits_list]
             if any(p < .01 or p > 1.0 for p in percents):
-                messagebox.showerror("Error", "Split percents must be between 1 and 100%")
+                messagebox.showerror("Error", "Split percents must be between 1 and 100%", parent=dialog)
                 return
             if any(percents[i] <= percents[i-1] for i in range(1, len(percents))):
-                messagebox.showerror("Error", "Split percents must be strictly increasing")
+                messagebox.showerror("Error", "Split percents must be strictly increasing", parent=dialog)
                 return
 
             if self.splits_checkbox:
@@ -588,31 +777,46 @@ class TimingToolUI:
                     base, ext = os.path.splitext(fname)
                     n = 0
                     while True:
-                        candidate = os.path.join(d, f"{base} backup{ext}" if n == 0 else f"{base} backup {n}{ext}")
+                        candidate = os.path.join(
+                            d, f"{base} backup{ext}" if n == 0 else f"{base} backup {n}{ext}")
                         if not os.path.exists(candidate):
                             break
                         n += 1
                     shutil.copy(orig, candidate)
                 except Exception as e:
-                    messagebox.showerror("Error", f"Failed to create backup: {e}")
+                    messagebox.showerror("Error", f"Failed to create backup: {e}", parent=dialog)
                     return
                 if hasattr(self.race_data_manager, 'save_split_data'):
                     saved = self.race_data_manager.save_split_data()
                     if not saved:
-                        messagebox.showerror("Error", "Failed to save updated split file")
+                        messagebox.showerror("Error", "Failed to save updated split file", parent=dialog)
                         return
 
             if hasattr(self, 'on_configure_splits') and self.on_configure_splits:
                 self.on_configure_splits(splits_list)
 
             dialog.destroy()
+            # Always refresh split view after saving (regardless of race state)
+            self.show_splits_if_enabled()
 
-        tk.Button(btn_frame, text="Save", command=save_and_close, bg="#27ae60", fg="white", width=20, font=("Helvetica", 20, "bold")).pack(side="left", padx=12)
-        tk.Button(btn_frame, text="Cancel", command=dialog.destroy, bg="#e74c3c", fg="white", width=20, font=("Helvetica", 20, "bold")).pack(side="left", padx=12)
+        tk.Button(btn_frame, text="Save", command=save_and_close,
+                  bg="#27ae60", fg="white", width=20, font=_font_bold).pack(side="left", padx=12)
+        tk.Button(btn_frame, text="Cancel", command=dialog.destroy,
+                  bg="#e74c3c", fg="white", width=20, font=_font_bold).pack(side="left", padx=12)
         dialog.focus_set()
 
     def toggle_split_view(self):
         """Toggle the split comparison view visibility."""
+        if self.dual_monitor:
+            # In dual monitor mode, split view is always shown when splits exist
+            if not self.split_view_visible:
+                _parent = self.dual_win if self.dual_win else self.root
+                if not self.split_view_frame:
+                    self.split_view_frame = tk.Frame(_parent, bg="#000000")
+                self._repack_split_view()
+                self.update_split_view()
+                self.split_view_visible = True
+            return
         self.split_view_visible = not self.split_view_visible
         # Do NOT sync split_view_var here — the checkbox is preference-only.
         # auto_hide_race_overlays hides the split view without clearing the preference.
@@ -627,7 +831,7 @@ class TimingToolUI:
                 self.split_view_frame.pack_forget()
         self._auto_resize()
 
-    def begin_race_display(self, mode: str, ghost_is_loaded: bool):
+    def begin_race_display(self, ghost_is_loaded: bool):
         """Show all race overlays atomically: one layout pass, one geometry shift.
 
         Replaces the four separate update_* show-calls at race-start so the
@@ -676,7 +880,9 @@ class TimingToolUI:
         # ── Frames that expand downward (packed AFTER main_container) ──
         if self.gear_rpm_frame and self.gear_rpm_enabled and not self.gear_rpm_visible:
             self.gear_rpm_visible = True
-            if self.race_panel and self.race_panel.winfo_ismapped():
+            _rp_same_window = (self.race_panel and self.race_panel.winfo_ismapped()
+                               and not self.dual_monitor)
+            if _rp_same_window:
                 self.gear_rpm_frame.pack(side="top", fill="x", before=self.race_panel)
             elif self.main_container:
                 self.gear_rpm_frame.pack(side="top", fill="x", after=self.main_container)
@@ -685,9 +891,11 @@ class TimingToolUI:
 
         if self.steering_frame and self.steering_enabled and not self.steering_visible:
             self.steering_visible = True
+            _rp_same_window = (self.race_panel and self.race_panel.winfo_ismapped()
+                               and not self.dual_monitor)
             if self.gear_rpm_visible and self.gear_rpm_frame:
                 self.steering_frame.pack(side="top", fill="x", after=self.gear_rpm_frame)
-            elif self.race_panel and self.race_panel.winfo_ismapped():
+            elif _rp_same_window:
                 self.steering_frame.pack(side="top", fill="x", after=self.race_panel)
             elif self.main_container:
                 self.steering_frame.pack(side="top", fill="x", after=self.main_container)
@@ -702,15 +910,16 @@ class TimingToolUI:
             and getattr(self.race_data_manager, 'splits', None)
         )
         if want_split:
+            _sv_parent = self.dual_win if (self.dual_monitor and self.dual_win) else self.root
             if not self.split_view_frame:
-                self.split_view_frame = tk.Frame(self.root, bg="#000000")
+                self.split_view_frame = tk.Frame(_sv_parent, bg="#000000")
             # Rebuild rows from reset data BEFORE making frame visible — no flicker.
             self.update_split_view()
             self.split_view_visible = True
             self._repack_split_view()
 
-        # ── Auto-hide race panel while racing ──
-        if self.race_panel_expanded and not self.debug_expanded:
+        # ── Auto-hide race panel while racing (skip in dual monitor mode) ──
+        if not self.dual_monitor and self.race_panel_expanded and not self.debug_expanded:
             self.race_panel_auto_hidden = True
             self.race_panel.pack_forget()
             self.race_panel_expanded = False
@@ -779,10 +988,13 @@ class TimingToolUI:
 
         Rows are rebuilt while the panel is hidden so the show is instant with
         no flicker.  Safe to call from any callback — no-ops if conditions are
-        not met.
+        not met.  In dual monitor mode the checkbox state is ignored — splits
+        are always shown when available.
         """
-        if not self.split_view_var or not self.split_view_var.get():
-            return  # checkbox is off — don't force the panel open
+        # In dual monitor mode always show splits; otherwise respect checkbox
+        if not self.dual_monitor:
+            if not self.split_view_var or not self.split_view_var.get():
+                return  # checkbox is off — don't force the panel open
         if not (self.race_data_manager and getattr(self.race_data_manager, 'splits', None)):
             return  # no splits loaded
         # Rebuild rows while panel is still hidden to avoid flicker.
@@ -809,6 +1021,8 @@ class TimingToolUI:
         Called at race *end* (not at menus).  Split view is intentionally
         left visible — it stays on screen until the player returns to menus.
         """
+        if self.dual_monitor:
+            return  # race panel is always visible in dual monitor mode
         if self.race_panel_auto_hidden:
             self.race_panel_auto_hidden = False
             try:
@@ -868,7 +1082,8 @@ class TimingToolUI:
 
     def _create_gear_rpm_bar(self):
         """Create the gear/RPM bar widget (packed into root, hidden by default)."""
-        bar_h = 52  # 35 * 1.5
+        bar_h = int(52 * self.current_scaling)
+        gear_font_size = 40
 
         self.gear_rpm_frame = tk.Frame(self.root, bg="#000000", height=bar_h)
         self.gear_rpm_frame.pack_propagate(False)
@@ -878,8 +1093,8 @@ class TimingToolUI:
         inner.pack(fill="both", expand=True, padx=(4, 4), pady=3)
 
         self.gear_label = tk.Label(
-            inner, text="0", width=2,
-            font=("Helvetica", 40, "bold"),
+            inner, text="0", width=1,
+            font=("Helvetica", gear_font_size, "bold"),
             fg="#ecf0f1", bg="#000000", anchor="center",
         )
         self.gear_label.pack(side="left", padx=(0, 4))
@@ -1008,7 +1223,8 @@ class TimingToolUI:
 
     def _create_steering_display(self):
         """Create the steering input bar widget (hidden by default)."""
-        bar_h = 46
+        bar_h = int(46 * self.current_scaling)
+        steer_font_size = 28
 
         self.steering_frame = tk.Frame(self.root, bg="#000000", height=bar_h)
         self.steering_frame.pack_propagate(False)
@@ -1019,7 +1235,7 @@ class TimingToolUI:
 
         self.steering_label = tk.Label(
             inner, text="0", width=3,
-            font=("Helvetica", 28, "bold"),
+            font=("Helvetica", steer_font_size, "bold"),
             fg="#ecf0f1", bg="#000000", anchor="center",
         )
         self.steering_label.pack(side="left", padx=(0, 0))
@@ -1129,7 +1345,7 @@ class TimingToolUI:
                 self.steering_frame.pack(
                     side="top", fill="x", after=self.gear_rpm_frame, padx=0, pady=0
                 )
-            elif self.race_panel and self.race_panel.winfo_ismapped():
+            elif self.race_panel and self.race_panel.winfo_ismapped() and not self.dual_monitor:
                 self.steering_frame.pack(
                     side="top", fill="x", after=self.race_panel, padx=0, pady=0
                 )
@@ -1163,7 +1379,7 @@ class TimingToolUI:
             elif 300/3.6 <= speed_raw < 350/3.6:
                 speed_raw = speed_raw*2.6 - 360/3.6
             elif speed_raw >= 350/3.6:
-                speed_raw = speed_raw - 200/3.6
+                speed_raw = speed_raw + 200/3.6
             else:
                 return 0.0
         if self.vel_mode in ("Fake MPH", "Real MPH"):
@@ -1458,7 +1674,7 @@ class TimingToolUI:
 
         if racing and not was_visible:
             # Place bar immediately after main_container, before race_panel
-            if self.race_panel and self.race_panel.winfo_ismapped():
+            if self.race_panel and self.race_panel.winfo_ismapped() and not self.dual_monitor:
                 self.gear_rpm_frame.pack(side="top", fill="x", before=self.race_panel)
             elif self.main_container:
                 self.gear_rpm_frame.pack(side="top", fill="x", after=self.main_container)
@@ -1472,11 +1688,15 @@ class TimingToolUI:
         if racing:
             self._draw_rpm_bar()
 
-    def _format_time_ms(self, raw_us: int) -> str:
+    def _format_time_ms(self, raw_us: int,short: bool = True) -> str:
         try:
             if not raw_us or raw_us == 0:
-                return "--.---"
+                return "--.---"if short else "-:--.---"
             seconds = raw_us / 1000000.0
+            if seconds >= 60:
+                minutes = int(seconds // 60)
+                seconds = seconds % 60
+                return f"{minutes}:{round(seconds,3):06.3f}"
             return f"{round(seconds,3):.3f}"
         except Exception:
             return "--.---"
@@ -1493,6 +1713,13 @@ class TimingToolUI:
 
     def _repack_split_view(self):
         """Re-attach split_view_frame below steering (if visible), gear/RPM, race panel, or top."""
+        if self.dual_monitor and self.dual_win:
+            # In dual monitor mode: pack in dual_win, directly below race_panel
+            if self.race_panel and self.race_panel.winfo_ismapped():
+                self.split_view_frame.pack(side="top", fill="x", after=self.race_panel, padx=0, pady=(0, 0))
+            else:
+                self.split_view_frame.pack(side="top", fill="x", padx=0, pady=(0, 0))
+            return
         if self.race_panel and self.race_panel.winfo_ismapped():
             self.split_view_frame.pack(side="top", fill="x", after=self.race_panel, padx=0, pady=(0, 0))
         elif self.steering_frame and self.steering_visible:
@@ -1504,8 +1731,19 @@ class TimingToolUI:
 
     def update_split_view(self):
         """Rebuild the split comparison view from current split data."""
+        # Validate dual_win — it may have been destroyed (e.g. during a scaling rebuild
+        # where root.winfo_children() includes Toplevel windows).
+        _parent = self.root
+        if self.dual_monitor and self.dual_win:
+            try:
+                if self.dual_win.winfo_exists():
+                    _parent = self.dual_win
+                else:
+                    self.dual_win = None
+            except Exception:
+                self.dual_win = None
         if not self.split_view_frame:
-            self.split_view_frame = tk.Frame(self.root, bg="#000000")
+            self.split_view_frame = tk.Frame(_parent, bg="#000000")
 
         splits, current, best, ghost = None, None, None, None
         if self.race_data_manager and hasattr(self.race_data_manager, 'get_splits'):
@@ -1535,7 +1773,7 @@ class TimingToolUI:
                 was_mapped = self.split_view_frame.winfo_ismapped()
             except tk.TclError:
                 # Frame was destroyed (e.g. after a scaling rebuild); treat as unmapped.
-                self.split_view_frame = tk.Frame(self.root, bg="#000000")
+                self.split_view_frame = tk.Frame(_parent, bg="#000000")
                 was_mapped = False
             if was_mapped:
                 self.split_view_frame.pack_forget()
@@ -1550,7 +1788,13 @@ class TimingToolUI:
                 self._repack_split_view()
             return
 
-        font_size = 18
+        # In DM mode use pixel-based font size (negative = pixels, bypasses tk scaling)
+        # so split rows scale with Scale-2, not Scale-1.
+        # Always use self.dual_scaling here — this method is called both from
+        # _rebuild_dual_win_contents (where current_scaling is temporarily swapped)
+        # AND from live race-update paths (where current_scaling = main scaling).
+        # Using dual_scaling unconditionally gives the correct result in both cases.
+        font_size = -int(19 * self.dual_scaling) if self.dual_monitor else 19
         index = 0
         for s_item in splits:
             row_bg = "#1a1a1a" if index % 2 == 0 else "#000000"
@@ -1600,8 +1844,8 @@ class TimingToolUI:
                             delta_display = self._format_delta_ms(delta_us)
                     except Exception:
                         delta_display = ""
-                    delta_us = current_time - ghost_time if current_time and ghost_time else 1
-                    fg_color = "#C2AC09" if delta_us < 0 else "white"
+                    delta_us = current_time - best_time if current_time and best_time else 1
+                    fg_color = "#C2AC09" if delta_us <= 0 else "white"
                     tk.Label(self.rows[index], text=name, bg=row_bg, fg=fg_color, anchor='w',
                             width=12, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
                     delta_fg = fg_color if fg_color != "white" else "#2ecc71" if delta_display and delta_display.startswith('-') else "#e74c3c"
@@ -1614,6 +1858,30 @@ class TimingToolUI:
                     tk.Label(self.rows[index], text=self._format_time_ms(best_time), bg=row_bg, fg=fg_color if fg_color != "white" else "#bdc3c7",
                             anchor='e', width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=4, sticky='e',pady=0)
             index += 1
+        if is_init: 
+            self.rows.append(None) # placeholder to preserve indexing for later updates
+            self.rows[index] = tk.Frame(self.split_view_frame, bg=row_bg)
+            self.rows[index].pack(fill='x', padx=0, pady=0)
+        ghost_time, sum_of_best_splits = self.race_data_manager.get_split_sums()
+        print(f"DEBUG: ghost_time={ghost_time}, sum_of_best_splits={sum_of_best_splits}")
+        best_possible_time = current[-1] if current else None
+        if best_possible_time and best and len(current) > 0 and len(best) > len(current):
+            for i in range(len(best)-len(current)): best_possible_time += best[len(current)+i]
+        delta_us = best_possible_time - ghost_time if best_possible_time and ghost_time else None
+        delta_display = self._format_delta_ms(delta_us) if delta_us else ""
+        tk.Label(self.rows[index], text="Best Case:", bg=row_bg, fg="white", anchor='w',
+                width=9, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+        delta_fg = "#2ecc71" if delta_display and delta_display.startswith('-') else "#e74c3c"
+        tk.Label(self.rows[index], text=delta_display, bg=row_bg, fg=delta_fg,anchor='w',
+                width=7, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='w',pady=0)
+        tk.Label(self.rows[index], text=self._format_time_ms(best_possible_time,False), bg=row_bg, fg="#bdc3c7",
+                anchor='w', width=7, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
+        tk.Label(self.rows[index], text="Perfect:", bg=row_bg, fg="white", anchor='e',
+                width=7, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=5, sticky='e',padx=0,pady=0)
+        tk.Label(self.rows[index], text=self._format_time_ms(sum_of_best_splits,False), bg=row_bg, fg="#bdc3c7",
+                anchor='e', width=7, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=6, sticky='e',pady=0)
+
+
 
         if is_init and was_mapped:
             self._repack_split_view()
@@ -1622,8 +1890,9 @@ class TimingToolUI:
     # ──────────────────────────────────────────────────────────────────────
 
     def update_background_color(self, mode: str, delta: float = None):
-        """Update UI background color based on race mode and delta."""
-        if mode == "Race vs Ghost" and delta is not None:
+        """Update UI background color based on ghost-loaded state and delta."""
+        _ghost_racing = (mode == "Race vs Ghost" or mode is True)
+        if _ghost_racing and delta is not None:
             if delta < 0:
                 bg_color = "#007000"  # green — ahead
             elif delta > 0:
@@ -1706,61 +1975,125 @@ class TimingToolUI:
     # ──────────────────────────────────────────────────────────────────────
 
     def adjust_scaling(self, delta: float):
-        """Adjust UI scaling in real-time by recreating the UI."""
+        """Adjust UI scaling in real-time by recreating the UI.
+
+        In dual monitor mode only the main window (root) content is rebuilt;
+        the dual window's race panel is refreshed via _rebuild_dual_win_contents
+        so it is never destroyed/repositioned by Scale-1 movements.
+        """
         if not self.root:
             return
 
-        old_scaling = self.current_scaling
         self.current_scaling += delta
-        self.current_scaling = max(0.5, min(2.0, self.current_scaling))
-        scaling_ratio = self.current_scaling / old_scaling
+        self.current_scaling = max(0.3, min(4.0, self.current_scaling))
 
         try:
+            # Capture root position BEFORE any geometry changes.
             current_geometry = self.root.geometry()
             parts = current_geometry.replace('x', '+').replace('+', ' ').split()
-            if len(parts) >= 4:
-                width, height, x, y = int(parts[0]), int(parts[1]), parts[2], parts[3]
-            else:
-                width, height, x, y = 300, 100, "100", "100"
-
-            new_width = int(width * scaling_ratio)
-            new_height = int(height * scaling_ratio)
+            x, y = (parts[2], parts[3]) if len(parts) >= 4 else ("100", "100")
 
             was_race_expanded = self.race_panel_expanded
             was_debug_expanded = self.debug_expanded
-            current_mode = self.get_current_mode() if self.mode_var else "Record Ghost"
+            # Capture split view state BEFORE destroying any widgets so it can
+            # be restored after the rebuild (non-DM only).
+            was_split_visible  = self.split_view_visible
+            was_split_enabled  = (self.split_view_var.get() if self.split_view_var
+                                   else self.split_view_enabled)
+            # Keep the backing var in sync so the rebuilt checkbox reads correctly.
+            self.split_view_enabled = was_split_enabled
 
+            # Update global font scaling (affects all POINT-sized fonts).
+            # In DM mode, dual_win fonts use PIXEL sizes (see _create_race_panel_content)
+            # so they are immune to this change — Scale-1 therefore only visually
+            # affects the main window fonts.
+            self.root.tk.call("tk", "scaling", self.current_scaling)
+
+            # Destroy root children.  dual_win is a Toplevel child of root and
+            # appears in winfo_children(); guard it so we never destroy it here.
             for widget in self.root.winfo_children():
-                widget.destroy()
-            # Null out references to destroyed widgets so update_split_view
-            # doesn't try to call methods on stale Tk objects.
-            self.split_view_frame = None
-            self.rows = []
+                if widget is self.dual_win:
+                    continue
+                try:
+                    widget.destroy()
+                except Exception:
+                    pass
+
+            # Clear stale refs for root-level overlays.
             self.gear_rpm_frame = None
             self.gear_rpm_visible = False
             self.velocity_frame = None
             self.velocity_visible = False
             self.velocity_height_shift = 0
+            if self.dual_monitor:
+                # Destroy the existing dual_win race panel and split view NOW,
+                # before _recreate_ui_content overwrites self.race_panel /
+                # self.split_view_frame with orphaned root-based frames.
+                # If we don't do this here, _rebuild_dual_win_contents sees
+                # self.race_panel = None and skips the destroy, resulting in a
+                # duplicate panel being packed into dual_win on top of the old one.
+                if self.race_panel:
+                    try:
+                        self.race_panel.destroy()
+                    except Exception:
+                        pass
+                self.race_panel = None
+                if self.split_view_frame:
+                    try:
+                        self.split_view_frame.destroy()
+                    except Exception:
+                        pass
+                self.split_view_frame = None
+                self.split_view_visible = False
+                self.rows = []
+            else:
+                # Non-DM: split view and race panel live in root — clear them.
+                self.split_view_frame = None
+                self.split_view_visible = False
+                self.rows = []
+                self.race_panel = None
 
-            self.root.tk.call("tk", "scaling", self.current_scaling)
+            # ── Rebuild root (delta display + overlay bars) ──────────────
+            # With self.dual_monitor = True, toggle_race_panel() inside
+            # _recreate_ui_content is a no-op, so no race panel is packed into
+            # root.  _recreate_ui_content creates self.race_panel as an orphaned
+            # root-based Frame which is discarded immediately after.
+            self._recreate_ui_content(x, y)
 
-            base_width = int(300 * self.current_scaling)
-            base_height = int(100 * self.current_scaling)
-            self.root.geometry(f"{base_width}x{base_height}")
+            if self.dual_monitor:
+                # Discard the orphaned root-based race_panel just created by
+                # _recreate_ui_content, then rebuild everything in dual_win.
+                try:
+                    self.race_panel.destroy()
+                except Exception:
+                    pass
+                self.race_panel = None
+                # Refresh dual_win content at dual_scaling (font + pixel sizes).
+                self._rebuild_dual_win_contents()
+            else:
+                # Non-DM: restore previously-open panel states.
+                if was_race_expanded and not self.race_panel_expanded:
+                    self.toggle_race_panel()
+                if was_debug_expanded and not self.debug_expanded:
+                    self.toggle_debug()
+                # Restore split view state: re-tick the checkbox var and
+                # re-show the panel if it was visible before the rebuild.
+                if was_split_enabled and self.split_view_var:
+                    self.split_view_var.set(True)
+                if was_split_visible and not self.split_view_visible:
+                    if (self.race_data_manager
+                            and getattr(self.race_data_manager, 'splits', None)):
+                        self.split_view_frame = tk.Frame(self.root, bg="#000000")
+                        self.update_split_view()
+                        self.split_view_visible = True
+                        self._repack_split_view()
 
-            self._recreate_ui_content()
-
-            if self.mode_var:
-                self.mode_var.set(current_mode)
-                self.on_mode_changed()
-
-            if was_race_expanded and not self.race_panel_expanded:
-                self.toggle_race_panel()
-            if was_debug_expanded and not self.debug_expanded:
-                self.toggle_debug()
-
+            # Pin main window position firmly — must be the very last step so
+            # no subsequent layout pass can nudge the window.
+            self.root.update_idletasks()
             self.root.geometry(f"+{x}+{y}")
-            print(f"Scaling adjusted to: {self.current_scaling:.2f}, Window size: {new_width}x{new_height}")
+
+            print(f"Scaling adjusted to: {self.current_scaling:.2f}")
         except tk.TclError as e:
             print(f"Error adjusting scaling: {e}")
 
@@ -1773,12 +2106,28 @@ class TimingToolUI:
     def reset_scaling(self):
         if not self.root:
             return
-        self.current_scaling = 1.15
-        try:
-            self.root.tk.call("tk", "scaling", self.current_scaling)
-            print(f"Scaling reset to: {self.current_scaling:.2f}")
-        except tk.TclError:
-            pass
+        target = 1.15
+        delta = round(target - self.current_scaling, 6)
+        if abs(delta) > 0.001:
+            self.adjust_scaling(delta)
+
+    def _on_scaling_slider(self, value):
+        """Debounced handler called when the scaling slider moves."""
+        if self._scaling_after_id:
+            try:
+                self.root.after_cancel(self._scaling_after_id)
+            except Exception:
+                pass
+        self._scaling_after_id = self.root.after(
+            150, lambda: self._apply_slider_scaling(float(value))
+        )
+
+    def _apply_slider_scaling(self, value: float):
+        """Apply an absolute scaling value coming from the slider."""
+        self._scaling_after_id = None
+        delta = round(value - self.current_scaling, 6)
+        if abs(delta) > 0.001:
+            self.adjust_scaling(delta)
 
     # ──────────────────────────────────────────────────────────────────────
     #  Drag support
@@ -1796,6 +2145,285 @@ class TimingToolUI:
         x = self.root.winfo_x() + (event.x - self.start_x)
         y = self.root.winfo_y() + (event.y - self.start_y)
         self.root.geometry(f"+{x}+{y}")
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  Dual monitor window drag support
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _dual_start_drag(self, event):
+        self._dual_start_x = event.x
+        self._dual_start_y = event.y
+
+    def _dual_on_drag(self, event):
+        if self.is_pinned or not self.dual_win:
+            return
+        x = self.dual_win.winfo_x() + (event.x - self._dual_start_x)
+        y = self.dual_win.winfo_y() + (event.y - self._dual_start_y)
+        self.dual_win.geometry(f"+{x}+{y}")
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  Dual monitor mode
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _get_second_monitor_origin(self) -> tuple:
+        """Return the top-left (x, y) of the second connected monitor, or (0, 0)."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            monitors = []
+
+            MonitorEnumProc = ctypes.WINFUNCTYPE(
+                ctypes.c_int,
+                ctypes.c_ulong, ctypes.c_ulong,
+                ctypes.POINTER(wintypes.RECT),
+                ctypes.c_longlong,
+            )
+
+            def _cb(hmon, hdc, lprect, lparam):
+                r = lprect.contents
+                monitors.append((r.left, r.top))
+                return 1
+
+            ctypes.windll.user32.EnumDisplayMonitors(None, None, MonitorEnumProc(_cb), 0)
+            # Primary monitor always has its top-left at (0, 0).
+            for m in monitors:
+                if m != (0, 0):
+                    return m
+        except Exception:
+            pass
+        return (0, 0)
+
+    def _rebuild_dual_win_contents(self):
+        """Tear down and recreate the race panel + split view inside dual_win
+        using self.dual_scaling so font/dimension choices scale correctly."""
+        if not self.dual_win:
+            return
+        try:
+            if not self.dual_win.winfo_exists():
+                return
+        except Exception:
+            return
+
+        # Swap in dual scaling for the rebuild; expose the real main-window
+        # scaling so _create_race_panel_content can seed the Scale-1 slider correctly.
+        main_scaling = self.current_scaling
+        self._dm_build_main_scaling = main_scaling
+        self.current_scaling = self.dual_scaling
+        try:
+            if self.race_panel:
+                try:
+                    self.race_panel.destroy()
+                except Exception:
+                    pass
+            self.race_panel = None
+
+            if self.split_view_frame:
+                try:
+                    self.split_view_frame.destroy()
+                except Exception:
+                    pass
+            self.split_view_frame = None
+            self.split_view_visible = False
+            self.rows = []
+
+            self.race_panel = tk.Frame(self.dual_win, bg="#000000", height=150)
+            self._create_race_panel_content()
+            self.race_panel.pack(side="top", fill="x", padx=0, pady=0)
+            self.race_panel_expanded = True
+
+            self.split_view_frame = tk.Frame(self.dual_win, bg="#000000")
+            self.split_view_visible = False
+            self.rows = []
+            # In DM mode splits are always shown when available — never gated
+            # by the checkbox (split_view_var may not even be shown in DM UI).
+            if (self.race_data_manager
+                    and getattr(self.race_data_manager, 'splits', None)):
+                self.update_split_view()
+                self.split_view_frame.pack(side="top", fill="x")
+                self.split_view_visible = True
+        finally:
+            self.current_scaling = main_scaling
+            self._dm_build_main_scaling = None
+
+    def _on_dual_scaling_slider(self, value):
+        """Debounced handler for the dual-monitor scaling slider."""
+        if self._dual_scaling_after_id:
+            try:
+                self.root.after_cancel(self._dual_scaling_after_id)
+            except Exception:
+                pass
+        self._dual_scaling_after_id = self.root.after(
+            150, lambda: self._apply_dual_slider_scaling(float(value))
+        )
+
+    def _apply_dual_slider_scaling(self, value: float):
+        """Apply a new scaling value to the dual monitor window."""
+        self._dual_scaling_after_id = None
+        value = max(0.3, min(4.0, value))
+        if abs(value - self.dual_scaling) > 0.001:
+            self.dual_scaling = value
+            self._rebuild_dual_win_contents()
+
+    def _has_second_monitor(self) -> bool:
+        """Return True when at least two monitors are connected (Windows)."""
+        try:
+            SM_CMONITORS = 80
+            return ctypes.windll.user32.GetSystemMetrics(SM_CMONITORS) >= 2
+        except Exception:
+            return True  # fail open — allow DM if the check is unavailable
+
+    def toggle_dual_monitor(self):
+        """Enable or disable dual monitor mode."""
+        wants_dm = self.dual_monitor_var.get() if self.dual_monitor_var else not self.dual_monitor
+
+        if wants_dm and not self._has_second_monitor():
+            # Revert the checkbox and warn the user
+            if self.dual_monitor_var:
+                self.dual_monitor_var.set(False)
+            messagebox.showwarning(
+                "Dual Monitor",
+                "No second monitor detected.\n"
+                "Connect a second monitor before enabling Dual Monitor mode."
+            )
+            return
+
+        # Auto-unpin both windows when switching modes so neither gets stranded
+        if self.is_pinned:
+            self.is_pinned = False
+            if self.pin_button:
+                try:
+                    self.pin_button.config(text="●", bg="#4ecdc4")
+                except Exception:
+                    pass
+
+        self.dual_monitor = wants_dm
+        if self.dual_monitor:
+            self._open_dual_window()
+        else:
+            self._close_dual_window()
+
+    def _open_dual_window(self):
+        """Create the secondary window and move race panel + split view into it."""
+        if self.dual_win:
+            return  # already open
+
+        # ── Hide/destroy old race panel (was in self.root) ──
+        try:
+            self.race_panel.destroy()
+        except Exception:
+            pass
+        self.race_panel = None
+
+        # ── Also destroy old split view ──
+        if self.split_view_frame:
+            try:
+                self.split_view_frame.destroy()
+            except Exception:
+                pass
+            self.split_view_frame = None
+            self.split_view_visible = False
+            self.rows = []
+
+        # ── Position dual window: second monitor origin, or saved position ──
+        try:
+            saved_x = self.ui_config.get("dual_win_x")
+            saved_y = self.ui_config.get("dual_win_y")
+            if saved_x is None or saved_y is None:
+                saved_x, saved_y = self._get_second_monitor_origin()
+        except Exception:
+            saved_x, saved_y = 0, 0
+
+        self.dual_win = tk.Toplevel(self.root)
+        self.dual_win.overrideredirect(True)
+        self.dual_win.wm_attributes("-topmost", True)
+        self.dual_win.configure(bg="#000000")
+        self.dual_win.geometry(f"+{saved_x}+{saved_y}")
+
+        # NOTE: drag bindings are placed on the header frame inside
+        # _create_race_panel_content (via _drag_start / _drag_move routing).
+        # Do NOT bind drag on the Toplevel itself — it would fire for every
+        # child widget (sliders, checkboxes, etc.) via the bindtag chain.
+
+        # ── Re-create race panel as child of dual_win (at dual_scaling) ──
+        main_scaling = self.current_scaling
+        self._dm_build_main_scaling = main_scaling
+        self.current_scaling = self.dual_scaling
+        try:
+            self.race_panel = tk.Frame(self.dual_win, bg="#000000", height=150)
+            self._create_race_panel_content()
+            self.race_panel.pack(side="top", fill="x", padx=0, pady=0)
+            self.race_panel_expanded = True
+
+            # ── Re-create split view in dual_win ──
+            self.split_view_frame = tk.Frame(self.dual_win, bg="#000000")
+            self.split_view_visible = False
+            self.rows = []
+            # In DM mode splits are always shown when available (no checkbox gate)
+            if (self.race_data_manager
+                    and getattr(self.race_data_manager, 'splits', None)):
+                self.update_split_view()
+                self.split_view_frame.pack(side="top", fill="x")
+                self.split_view_visible = True
+        finally:
+            self.current_scaling = main_scaling
+            self._dm_build_main_scaling = None
+
+        # Resize main window (removed race panel height)
+        self._auto_resize()
+
+    def _close_dual_window(self):
+        """Destroy the secondary window and bring race panel + split view back to root."""
+        # ── Save dual window position for next time ──
+        # Restore main window font scaling
+        self.root.tk.call("tk", "scaling", self.current_scaling)
+
+        if self.dual_win:
+            try:
+                self.ui_config["dual_win_x"] = self.dual_win.winfo_x()
+                self.ui_config["dual_win_y"] = self.dual_win.winfo_y()
+            except Exception:
+                pass
+
+        # ── Destroy old dual-win race panel / split view ──
+        try:
+            self.race_panel.destroy()
+        except Exception:
+            pass
+        self.race_panel = None
+
+        if self.split_view_frame:
+            try:
+                self.split_view_frame.destroy()
+            except Exception:
+                pass
+            self.split_view_frame = None
+            self.split_view_visible = False
+            self.rows = []
+
+        if self.dual_win:
+            try:
+                self.dual_win.destroy()
+            except Exception:
+                pass
+            self.dual_win = None
+
+        # ── Re-create race panel back in self.root ──
+        self.race_panel = tk.Frame(self.root, bg="#000000", height=150)
+        self._create_race_panel_content()
+        # Restore previous panel state (open it)
+        self.race_panel_expanded = False
+        self.toggle_race_panel()
+
+        # ── Restore split view in root if it should be visible ──
+        if (self.split_view_var and self.split_view_var.get()
+                and self.race_data_manager
+                and getattr(self.race_data_manager, 'splits', None)):
+            self.split_view_frame = tk.Frame(self.root, bg="#000000")
+            self.update_split_view()
+            self.split_view_visible = True
+            self._repack_split_view()
+
+        self._auto_resize()
 
     # ──────────────────────────────────────────────────────────────────────
     #  UI creation  (matches old v4 layout exactly)
@@ -1837,7 +2465,7 @@ class TimingToolUI:
         self.root.configure(bg="#000000")
 
         # Pin state
-        self.is_pinned = self.ui_config.get("is_pinned", True)
+        self.is_pinned = self.ui_config.get("is_pinned", False)
         self.root.wm_attributes("-topmost", True)
 
         # ── Main container (fixed height — does not grow with panels) ──
@@ -1899,6 +2527,10 @@ class TimingToolUI:
         self.race_panel_expanded = False
         self.toggle_race_panel()
 
+        # Restore dual monitor mode if it was saved as enabled.
+        if self.dual_monitor:
+            self._open_dual_window()
+
         # Start UI update loop
         self.update_ui()
 
@@ -1906,14 +2538,25 @@ class TimingToolUI:
         self.root.focus_force()
         self.root.mainloop()
 
-    def _recreate_ui_content(self):
+    def _recreate_ui_content(self, saved_x: str = None, saved_y: str = None):
         """Recreate the UI content after scaling change (mirrors create_ui layout)."""
         self.race_panel_expanded = False
         self.debug_expanded = False
 
         base_width = int(300 * self.current_scaling)
         base_height = int(80 * self.current_scaling)
-        self.root.geometry(f"{base_width}x{base_height}")
+        # Always include position so _auto_resize reads correct X/Y coordinates.
+        if saved_x is not None and saved_y is not None:
+            self.root.geometry(f"{base_width}x{base_height}+{saved_x}+{saved_y}")
+        else:
+            # Preserve current position — read it fresh before overwriting size.
+            try:
+                _geo = self.root.geometry()
+                _parts = _geo.replace('x', '+').replace('+', ' ').split()
+                saved_x, saved_y = _parts[2], _parts[3]
+                self.root.geometry(f"{base_width}x{base_height}+{saved_x}+{saved_y}")
+            except Exception:
+                self.root.geometry(f"{base_width}x{base_height}")
         self.root.overrideredirect(True)
 
         self.root.configure(bg="#000000")
@@ -2004,13 +2647,25 @@ class TimingToolUI:
         py = int(10 * self.current_scaling)
         py_sm = int(6 * self.current_scaling)
 
+        # Font-size helper.
+        # In DM mode widgets are inside dual_win and must have sizes independent
+        # of the global tk scaling (which Scale-1 changes).  Negative Tk font
+        # sizes are in pixels and are NOT affected by tk scaling, so they give
+        # us true per-window independent scaling when Scale-2 is used.
+        # In non-DM mode use plain positive point sizes so tk scaling (Scale-1)
+        # auto-scales them as normal.
+        def _pf(base: int) -> int:
+            if self.dual_monitor:
+                return -int(base * self.current_scaling)  # pixels, bypasses tk scaling
+            return base  # points, auto-scaled by tk scaling
+
         # Apply a ttk Style so the Combobox matches the UI theme.
         # 'clam' theme is required on Windows — the default 'vista'/'winnative'
         # theme ignores fieldbackground, arrowcolor, and font overrides entirely.
         style = ttk.Style()
         style.theme_use('clam')
         style.configure("Race.TCombobox",
-                        font=("Helvetica", 15, "bold"),
+                        font=("Helvetica", _pf(15), "bold"),
                         foreground="#ecf0f1",
                         background="#34495e",
                         fieldbackground="#34495e",
@@ -2025,7 +2680,7 @@ class TimingToolUI:
                   foreground=[("readonly", "#ecf0f1")],
                   background=[("active", "#4a6785"), ("!active", "#34495e")])
         # Dropdown popup listbox — styled via tk option database (not ttk)
-        self.root.option_add('*TCombobox*Listbox.font', ("Helvetica", 15, "bold"))
+        self.root.option_add('*TCombobox*Listbox.font', ("Helvetica", _pf(15), "bold"))
         self.root.option_add('*TCombobox*Listbox.background', "#34495e")
         self.root.option_add('*TCombobox*Listbox.foreground', "#ecf0f1")
         self.root.option_add('*TCombobox*Listbox.selectBackground', "#202d3a")
@@ -2033,19 +2688,24 @@ class TimingToolUI:
         self.root.option_add('*TCombobox*Listbox.relief', "flat")
 
         # ── Header row: indicator label + button cluster ──
+        # When in dual monitor mode the race panel lives in dual_win, so drag
+        # bindings must move dual_win — not self.root.
+        _drag_start = self._dual_start_drag if self.dual_monitor else self.start_drag
+        _drag_move  = self._dual_on_drag    if self.dual_monitor else self.on_drag
+
         header_frame = tk.Frame(self.race_panel, bg="#000000")
         header_frame.pack(fill="x", padx=px, pady=(py, 0))
-        header_frame.bind('<Button-1>', self.start_drag)
-        header_frame.bind('<B1-Motion>', self.on_drag)
+        header_frame.bind('<Button-1>', _drag_start)
+        header_frame.bind('<B1-Motion>', _drag_move)
         header_frame.bind('<Button-3>', self.toggle_race_panel)
 
         self.race_control_indicator = tk.Label(
             header_frame, text="ALU Timer v5.0",
-            font=("Helvetica", 18, "bold"), fg="white", bg="#000000", anchor='w'
+            font=("Helvetica", _pf(18), "bold"), fg="white", bg="#000000", anchor='w'
         )
         self.race_control_indicator.pack(side="left")
-        self.race_control_indicator.bind('<Button-1>', self.start_drag)
-        self.race_control_indicator.bind('<B1-Motion>', self.on_drag)
+        self.race_control_indicator.bind('<Button-1>', _drag_start)
+        self.race_control_indicator.bind('<B1-Motion>', _drag_move)
         self.race_control_indicator.bind('<Button-3>', self.toggle_race_panel)
 
         header_btns = tk.Frame(header_frame, bg="#000000")
@@ -2053,7 +2713,7 @@ class TimingToolUI:
 
         self.close_button = tk.Button(
             header_btns, text="✕", command=self.close_app,
-            bg="#e74c3c", fg="white", font=("Helvetica", 11, "bold"),
+            bg="#e74c3c", fg="white", font=("Helvetica", _pf(11), "bold"),
             relief="flat", width=3, height=0, pady=0,
         )
         self.close_button.pack(side="right", padx=2, pady=2)
@@ -2062,14 +2722,14 @@ class TimingToolUI:
         pin_bg = "#95a5a6" if self.is_pinned else "#4ecdc4"
         self.pin_button = tk.Button(
             header_btns, text=pin_text, command=self.toggle_pin,
-            bg=pin_bg, fg="white", font=("Helvetica", 11, "bold"),
+            bg=pin_bg, fg="white", font=("Helvetica", _pf(11), "bold"),
             relief="flat", width=3, height=0, pady=0,
         )
         self.pin_button.pack(side="right", padx=2, pady=2)
 
         self.debug_button = tk.Button(
             header_btns, text="🐛", command=self.toggle_debug,
-            bg="#3498db", fg="white", font=("Helvetica", 11, "bold"),
+            bg="#3498db", fg="white", font=("Helvetica", _pf(11), "bold"),
             relief="flat", width=3, height=0, pady=0,
         )
         self.debug_button.pack(side="right", padx=2, pady=2)
@@ -2082,129 +2742,194 @@ class TimingToolUI:
         main_container.columnconfigure(1, weight=1, uniform="col")
         main_container.rowconfigure(0, weight=1)
 
-        # ── Left column: Ghost info + Mode selector + Debug button ──
+        # ── Left column: Ghost info + Load/Unload + Save + Split Config ──
         left_column = tk.Frame(main_container, bg="#000000")
         left_column.grid(row=0, column=0, sticky="nsew", padx=(0, px // 2))
 
-        # Ghost section
-        ghost_frame = tk.Frame(left_column, bg="#000000")
-        ghost_frame.pack(fill="x", pady=(0, py_sm))
-
+        # Ghost name label
         self.ghost_filename_label = tk.Label(
-            ghost_frame, text="By Orange & Bholla64",
-            font=("Helvetica", 12,'bold'), fg="#b4c6c8", bg="#000000",
-            wraplength=200, justify="left"
+            left_column, text="By Orange & Bholla64",
+            font=("Helvetica", _pf(12), "bold"), fg="#b4c6c8", bg="#000000",
+             justify="left"
         )
-        self.ghost_filename_label.pack(anchor="w", pady=(0, 0))
+        self.ghost_filename_label.pack(anchor="w", pady=(0, py_sm))
 
-        # Mode section
-        mode_frame = tk.Frame(left_column, bg="#000000")
-        mode_frame.pack(fill="x", pady=(0, py))
-
-        self.mode_var = tk.StringVar(value="Record Ghost")
-        self.mode_combobox = ttk.Combobox(
-            mode_frame, textvariable=self.mode_var,
-            values=["Record Ghost", "Race vs Ghost"],
-            state="readonly", width=14,
-            style="Race.TCombobox",
-            font=("Helvetica", 15, "bold"),
+        # Load / Unload Ghost toggle button
+        _ghost_loaded = (self.race_data_manager is not None
+                         and self.race_data_manager.is_ghost_loaded())
+        _load_text = "Unload Ghost" if _ghost_loaded else "Load Ghost"
+        _load_cmd  = self.unload_ghost_action if _ghost_loaded else self.load_ghost_file
+        self.load_ghost_button = tk.Button(
+            left_column, text=_load_text, command=_load_cmd,
+            bg="#3498db", fg="white", font=("Helvetica", _pf(15), "bold"),
+            relief="flat",
         )
-        self.mode_combobox.pack(anchor="w", fill="x", pady=(round(0.7353 * self.current_scaling), 0))
-        self.mode_combobox.bind('<<ComboboxSelected>>', self.on_mode_changed)
+        self.load_ghost_button.pack(fill="x", pady=(0, py_sm))
+
+        # Save Ghost (enabled only when race data exists)
+        self.save_ghost_button = tk.Button(
+            left_column, text="Save Ghost", command=self.save_ghost_file,
+            bg="#7f8c8d", fg="white", font=("Helvetica", _pf(15), "bold"),
+            relief="flat", state="disabled",
+        )
+        self.save_ghost_button.pack(fill="x", pady=(0, py_sm))
+
+        # Split Config / Rename Splits
+        _split_btn_text = "Rename Splits" if _ghost_loaded else "Split Config"
+        self.configure_splits_button = tk.Button(
+            left_column, text=_split_btn_text,
+            command=self.open_configure_splits_dialog,
+            bg="#8e44ad", fg="white", font=("Helvetica", _pf(15), "bold"),
+            relief="flat",
+        )
+        self.configure_splits_button.pack(fill="x", pady=(0, 0))
+
+        # Scaling slider (replaces Ctrl+/- keyboard shortcuts)
+        _scale_label = "Scale" if not self.dual_monitor else "Scale-1"
+        self.scale_row = tk.Frame(left_column, bg="#000000")
+        tk.Label(
+            self.scale_row, text=_scale_label, bg="#000000", fg="#aaaaaa",
+            font=("Helvetica", _pf(12)),
+        ).pack(side="left")
+        # Scale-1 slider always reflects the real main-window scaling, even when
+        # this method is called during a DM rebuild where current_scaling is
+        # temporarily set to dual_scaling.
+        _s1_value = self._dm_build_main_scaling if self._dm_build_main_scaling is not None else self.current_scaling
+        self.scaling_slider_var = tk.DoubleVar(value=_s1_value)
+        self.scaling_slider = tk.Scale(
+            self.scale_row,
+            from_=0.3, to=4.0, resolution=0.01, orient="horizontal",
+            variable=self.scaling_slider_var,
+            command=self._on_scaling_slider,
+            bg="#000000", fg="white", troughcolor="#333333",
+            highlightthickness=0, showvalue=0, sliderlength=12,
+        )
+        self.scaling_slider.pack(side="left", fill="x", expand=True)
+        # Remove Toplevel from bindtag chain so slider events never reach
+        # any window-level drag binding (does not affect the widget itself).
+        _tags = list(self.scaling_slider.bindtags())
+        _tl = str(self.scaling_slider.winfo_toplevel())
+        if _tl in _tags:
+            _tags.remove(_tl)
+        self.scaling_slider.bindtags(_tags)
+        # Only show the slider row when the window is unpinned.
+        if not self.is_pinned:
+            self.scale_row.pack(fill="x", pady=(py_sm, 0))
+        right_column = tk.Frame(main_container, bg="#000000")
+        right_column.grid(row=0, column=1, sticky="nsew", padx=(px // 2, 0),
+                          pady=(round(2 * self.current_scaling), 0))
 
         # Velocity mode dropdown
         self.vel_mode_var = tk.StringVar(value=self.vel_mode)
         vel_mode_combobox = ttk.Combobox(
-            left_column, textvariable=self.vel_mode_var,
+            right_column, textvariable=self.vel_mode_var,
             values=["Speed Off", "Real KM/H", "Fake KM/H", "Real MPH", "Fake MPH"],
             state="readonly", width=14,
             style="Race.TCombobox",
-            font=("Helvetica", 15, "bold"),
+            font=("Helvetica", _pf(14), "bold"),
         )
-        vel_mode_combobox.pack(anchor="w", fill="x", pady=(round(0.7353 * self.current_scaling), 0))
+        vel_mode_combobox.pack(anchor="w", fill="x",
+                               pady=(round(0.7353 * self.current_scaling), py_sm))
         vel_mode_combobox.bind('<<ComboboxSelected>>', self.on_vel_mode_changed)
 
-        # Checkboxes row: Splits + Gear/RPM side by side
-        checks_frame = tk.Frame(left_column, bg="#000000")
-        checks_frame.pack(fill="x", pady=(round(2 * self.current_scaling), 0))
-
-        self.split_view_var = tk.BooleanVar(value=self.split_view_enabled)
-        self.splits_checkbox = tk.Checkbutton(
-            checks_frame, text="Splits", variable=self.split_view_var,
-            command=self._on_splits_checkbox_changed,
+        # Dual Monitor checkbox (always enabled) — shown first
+        self.dual_monitor_var = tk.BooleanVar(value=self.dual_monitor)
+        tk.Checkbutton(
+            right_column, text="Dual Monitor", variable=self.dual_monitor_var,
+            command=self.toggle_dual_monitor,
             bg="#000000", fg="white", selectcolor="#1a1a1a",
             activebackground="#000000", activeforeground="#ecf0f1",
-            font=("Helvetica", 12, "bold"),
-            relief="flat", state="disabled",
-        )
-        self.splits_checkbox.pack(side="left", padx=(0, 8))
+            font=("Helvetica", _pf(14), "bold"),
+            relief="flat",
+            state="normal",
+        ).pack(anchor="w")
 
+        # In dual monitor mode the Scale-2 slider is placed at the bottom of
+        # the right column (below vdelta). Just set up the var/placeholder here.
+        if self.dual_monitor:
+            # Splits checkbox placeholder — keep var in sync but don't show widget
+            self.split_view_var = tk.BooleanVar(value=self.split_view_enabled)
+            self.splits_checkbox = None
+        else:
+            # Normal mode: show splits checkbox
+            self.split_view_var = tk.BooleanVar(value=self.split_view_enabled)
+            self.splits_checkbox = tk.Checkbutton(
+                right_column, text="Splits Display", variable=self.split_view_var,
+                command=self._on_splits_checkbox_changed,
+                bg="#000000", fg="white", selectcolor="#1a1a1a",
+                activebackground="#000000", activeforeground="#ecf0f1",
+                font=("Helvetica", _pf(14), "bold"),
+                relief="flat", state="disabled",
+            )
+            self.splits_checkbox.pack(anchor="w")
+
+        # Gear/RPM checkbox
         self.gear_rpm_var = tk.BooleanVar(value=self.gear_rpm_enabled)
         self.gear_rpm_checkbox = tk.Checkbutton(
-            checks_frame, text="Gear/RPM", variable=self.gear_rpm_var,
+            right_column, text="Show Gear/RPM", variable=self.gear_rpm_var,
             command=self.on_gear_rpm_changed,
             bg="#000000", fg="white", selectcolor="#1a1a1a",
             activebackground="#000000", activeforeground="#ecf0f1",
-            font=("Helvetica", 12, "bold"),
+            font=("Helvetica", _pf(13), "bold"),
             relief="flat",
         )
-        self.gear_rpm_checkbox.pack(side="left")
+        self.gear_rpm_checkbox.pack(anchor="w")
 
-        # ── Right column: slot button + Save ──
-        right_column = tk.Frame(main_container, bg="#000000")
-        right_column.grid(row=0, column=1, sticky="nsew", padx=(px // 2, 0),pady=(round(2*self.current_scaling),0))
-
-        # Slot 1 — Configure Splits (record mode, packed by default)
-        # Load Race Ghost is created here but NOT packed — swapped in on_mode_changed
-        self.configure_splits_button = tk.Button(
-            right_column, text="Split Config",
-            command=self.open_configure_splits_dialog,
-            bg="#8e44ad", fg="white", font=("Helvetica", 18, "bold"),
-            relief="flat",
-        )
-        self.configure_splits_button.pack(fill="x", pady=(0, py))
-
-        self.load_ghost_button = tk.Button(
-            right_column, text="Load Ghost", command=self.load_ghost_file,
-            bg="#3498db", fg="white", font=("Helvetica", 18, "bold"),
-            relief="flat",
-        )
-        # NOT packed here — only shown when mode == "Race vs Ghost"
-
-        # Slot 2 — Save Ghost (always present, enabled when data exists)
-        self.save_ghost_button = tk.Button(
-            right_column, text="Save Ghost", command=self.save_ghost_file,
-            bg="#7f8c8d", fg="white", font=("Helvetica", 18, "bold"),
-            relief="flat", state="disabled",
-        )
-        self.save_ghost_button.pack(fill="x", pady=(0, 0))
-
-        # Steering + V delta toggles (side by side in one row)
-        overlays_row = tk.Frame(right_column, bg="#000000")
-        overlays_row.pack(anchor="w", pady=(round(2 * self.current_scaling), 0))
-
+        # Steering checkbox
         self.steering_var = tk.BooleanVar(value=self.steering_enabled)
         self.steering_checkbox = tk.Checkbutton(
-            overlays_row, text="Steering", variable=self.steering_var,
+            right_column, text="Show Steering", variable=self.steering_var,
             command=self.on_steering_changed,
             bg="#000000", fg="white", selectcolor="#1a1a1a",
             activebackground="#000000", activeforeground="#ecf0f1",
-            font=("Helvetica", 12, "bold"),
+            font=("Helvetica", _pf(14), "bold"),
             relief="flat",
         )
-        self.steering_checkbox.pack(side="left", padx=(0, 6))
+        self.steering_checkbox.pack(anchor="w")
 
+        # V-delta checkbox (enabled only when a ghost is loaded)
         self.vdelta_var = tk.BooleanVar(value=self.vdelta_enabled)
+        _vdelta_state = "normal" if _ghost_loaded else "disabled"
         self.vdelta_checkbox = tk.Checkbutton(
-            overlays_row, text="V delta", variable=self.vdelta_var,
+            right_column, text="Speed delta", variable=self.vdelta_var,
             command=self.on_vdelta_changed,
             bg="#000000", fg="white", selectcolor="#1a1a1a",
             activebackground="#000000", activeforeground="#ecf0f1",
-            font=("Helvetica", 12, "bold"),
+            font=("Helvetica", _pf(14), "bold"),
             relief="flat",
-            state="disabled",  # disabled in Record Ghost mode; enabled on mode switch
+            state=_vdelta_state,
         )
-        self.vdelta_checkbox.pack(side="left")
+        self.vdelta_checkbox.pack(anchor="w")
+
+        # Scale-2 slider — bottom of right column, only in dual monitor mode
+        if self.dual_monitor:
+            self.dm_scale_row = tk.Frame(right_column, bg="#000000")
+            tk.Label(
+                self.dm_scale_row, text="Scale-2", bg="#000000", fg="#aaaaaa",
+                font=("Helvetica", _pf(12)),
+            ).pack(side="left")
+            self.dual_scaling_slider_var = tk.DoubleVar(value=self.dual_scaling)
+            self.dual_scaling_slider = tk.Scale(
+                self.dm_scale_row,
+                from_=0.3, to=4.0, resolution=0.01, orient="horizontal",
+                variable=self.dual_scaling_slider_var,
+                command=self._on_dual_scaling_slider,
+                bg="#000000", fg="white", troughcolor="#333333",
+                highlightthickness=0, showvalue=0, sliderlength=12,
+            )
+            self.dual_scaling_slider.pack(side="left", fill="x", expand=True)
+            # Remove Toplevel from bindtag chain so slider events never reach
+            # any window-level drag binding (does not affect the widget itself).
+            _tags = list(self.dual_scaling_slider.bindtags())
+            _tl = str(self.dual_scaling_slider.winfo_toplevel())
+            if _tl in _tags:
+                _tags.remove(_tl)
+            self.dual_scaling_slider.bindtags(_tags)
+            # Only show the slider row when the window is unpinned.
+            if not self.is_pinned:
+                self.dm_scale_row.pack(fill="x", pady=(0, 0))
+        else:
+            self.dm_scale_row = None
 
         # Enable splits checkbox now if splits are already configured.
         self.update_splits_checkbox_state()
@@ -2287,8 +3012,9 @@ class TimingToolUI:
             return
 
         try:
-            current_mode = self.get_current_mode()
-            if current_mode == "Race vs Ghost":
+            ghost_loaded = (self.race_data_manager is not None
+                            and self.race_data_manager.is_ghost_loaded())
+            if ghost_loaded:
                 if self.delta_time and self.delta_time != "−−.−−−":
                     self.delta_label.config(text=self.delta_time, font=("Franklin Gothic Heavy", 90))
                 elif self.current_timer_display == "00:00.000":
@@ -2296,7 +3022,7 @@ class TimingToolUI:
                 else:
                     self.delta_label.config(text=self.current_timer_display, font=("Helvetica", 65))
             else:
-                # Record mode: show live timer or "Rec..."
+                # No ghost loaded: show live timer or "Record Mode"
                 if self.current_timer_display and self.current_timer_display != "00:00.000":
                     self.delta_label.config(text=self.current_timer_display, font=("Helvetica", 65))
                 else:

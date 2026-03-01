@@ -611,6 +611,9 @@ class DataExtractor:
     def __init__(self, poll_interval: float = 0.001):
         self.poll_interval = poll_interval
 
+        # Shutdown signal — set by stop() so the capture poll loop can abort early.
+        self._stop_event: threading.Event = threading.Event()
+
         # pymem state
         self._pm:     Optional[pymem.Pymem] = None
         self._base:   int                   = 0
@@ -712,6 +715,8 @@ class DataExtractor:
 
     def stop(self) -> None:
         """Remove all hooks (permanent VT + steering + any live temporary hooks) and release resources."""
+        # Signal the capture poll loop to abort immediately if it is running.
+        self._stop_event.set()
         self._emergency_remove_temp_hooks()
         self._remove_steering_hook()
         self._remove_vt_hook()
@@ -1471,6 +1476,12 @@ class DataExtractor:
                       f"({self._CAPTURE_SAFETY_TIMEOUT_S:.0f}s) reached.")
                 break
 
+            # Abort early if stop() was called (program is closing).
+            if self._stop_event.is_set():
+                print("[DataExtractor]   ✗ Stop requested — aborting capture")
+                capture_aborted = True
+                break
+
             time.sleep(0.001)
 
         if not rdi_captured and not capture_aborted:
@@ -1557,12 +1568,18 @@ class DataExtractor:
                 try: _vfree(handle, alloc)
                 except Exception: pass
 
-        if deferred:
+        if deferred and not self._stop_event.is_set():
             self._deferred_prog_alloc = alloc3
             self._deferred_prog_inj   = inj3
             self._deferred_prog_orig  = prog_orig_bytes
             threading.Thread(target=self._deferred_progress_capture,
                              daemon=True).start()
+        elif deferred:
+            # Stopping: restore the progress patch now instead of deferring.
+            if prog_orig_bytes:
+                self._restore_patches({inj3: prog_orig_bytes})
+            try: _vfree(handle, alloc3)
+            except Exception: pass
         else:
             try: _vfree(handle, alloc3)
             except Exception: pass

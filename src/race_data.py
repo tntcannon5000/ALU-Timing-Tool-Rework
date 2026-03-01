@@ -158,7 +158,7 @@ class RaceDataManager:
                 "velocities": cur_vels,
                 "split_progress": self.split_progress.tolist() if self.is_split_loaded else self.current_progress_data.tolist(),
                 "split_times": self.split_times.tolist() if self.is_split_loaded else self.current_time_data.tolist(),
-                "split_velocities": (_nan_to_none(self.split_velocities) if self.split_velocities is not None else cur_vels),
+                "split_velocities": (_nan_to_none(self.split_velocities) if self.is_split_loaded and self.split_velocities is not None else cur_vels),
                 "splits": self.splits if self.splits is not None else None,
             }
             
@@ -376,6 +376,12 @@ class RaceDataManager:
         """Return normalized splits list or None."""
         return self.splits, self.current_splits, self.best_splits, self.ghost_splits
     
+    def get_split_sums(self) -> tuple:
+        """Return the cumulative sums of the current splits and best splits."""
+        ghost_sum = self.ghost_time_data[-1] if self.ghost_time_data is not None and len(self.ghost_time_data) > 0 else None
+        best_sum = self.split_times[-1] if self.split_times is not None and len(self.split_times) > 0 else None
+        return ghost_sum, best_sum
+
     def get_ghost_time_at_progress(self, progress: float) -> Optional[str]:
         """
         Get the ghost time at a specific percentage.
@@ -505,7 +511,15 @@ class RaceDataManager:
         return os.path.splitext(os.path.basename(self.ghost_filename))[0]
     
     def unload_ghost(self):
-        """Unload the current ghost data."""
+        """Unload the current ghost data and all associated split configuration."""
         self.ghost_time_data = None
         self.ghost_progress_data = None
+        self.ghost_velocity_data = None
         self.ghost_filename = None
+        self.splits = None
+        self.split_progress = None
+        self.split_times = None
+        self.split_velocities = None
+        self.best_splits = None
+        self.ghost_splits = None
+        self.is_split_loaded = False

@@ -199,15 +199,23 @@ class ALUTimingTool:
         self.shutdown_in_progress = True
         print("Shutting down all threads...")
         self.capturing = False
-        self.de_client.stop()
+        # Signal the DataExtractor to abort any in-progress capture poll loop.
+        # The actual hook removal (de_client.stop) is called from run_main_loop
+        # *after* the while loop exits, ensuring no race with _capture_addresses.
+        self.de_client._stop_event.set()
         if hasattr(self, "ui_thread") and self.ui_thread and self.ui_thread.is_alive():
             self.ui_thread.join(timeout=1.0)
         print("All threads shutdown complete")
 
     def stop(self):
-        if self.shutdown_in_progress:
-            return
-        self._shutdown_all_threads()
+        if not self.shutdown_in_progress:
+            self._shutdown_all_threads()
+        # Always attempt to remove hooks as a safety net — de_client.stop()
+        # is idempotent and will gracefully no-op if already cleaned up.
+        try:
+            self.de_client.stop()
+        except Exception as exc:
+            print(f"[ALUTimingTool] Warning during stop cleanup: {exc}")
 
     def end_init(self):
         """Call once we've seen the first 'menus' state to end init phase."""
@@ -341,14 +349,12 @@ class ALUTimingTool:
         self.ui.update_delta("−−.−−−")
         self.race_data_manager.record_final_time(final_time, self.last_velocity_raw)
 
-        mode_label = self.ui.get_current_mode()
         print(
-            f"Race completed in {mode_label} mode! "
-            f"Final: {self._format_timer(final_time)}"
+            f"Race completed! Final: {self._format_timer(final_time)}"
         )
 
-        # Check for personal best (only meaningful in Race vs Ghost mode)
-        if mode_label == "Race vs Ghost" and self.race_data_manager.is_ghost_loaded():
+        # Check for personal best (only meaningful when a ghost is loaded)
+        if self.race_data_manager.is_ghost_loaded():
             delta_at_finish = self.race_data_manager.calculate_delta(1.0, final_time)
             if delta_at_finish is not None and delta_at_finish < 0:
                 print(f"New PB detected! Delta at finish: {delta_at_finish:.3f}s")
@@ -400,10 +406,9 @@ class ALUTimingTool:
                 print(f"Skipping {current_progress*100:.2f}% — already recorded as {existing}us")
             self.ui.update_save_ghost_button_state()
 
-        current_mode = self.ui.get_current_mode()
         ghost_loaded = self.race_data_manager.is_ghost_loaded()
 
-        if current_mode == "Race vs Ghost" and ghost_loaded and self.race_in_progress:
+        if ghost_loaded and self.race_in_progress:
             if current_progress < 1:
                 delta_seconds = self.race_data_manager.calculate_delta(current_progress, timer_us)
                 if delta_seconds is not None:
@@ -507,7 +512,7 @@ class ALUTimingTool:
                     self.reset_race_state()
                 self.race_in_progress = True
                 self.ui.update_delta("=0.000")
-                self.ui.update_background_color("Race vs Ghost", 0)
+                self.ui.update_background_color(self.race_data_manager.is_ghost_loaded(), 0)
                 # Clear debounce clock — we're genuinely racing now.
                 self._last_starting_ts = None
                 # Fallback: if begin_race_display was never called (e.g. game
@@ -517,7 +522,7 @@ class ALUTimingTool:
                     self._starting_display_shown = True
                     self.starting = True
                     ghost_loaded_now = self.race_data_manager.is_ghost_loaded()
-                    self.ui.begin_race_display(self.ui.get_current_mode(), ghost_loaded_now)
+                    self.ui.begin_race_display(ghost_loaded_now)
                     try:
                         self.ui.update_splits(0, 0.0)
                     except Exception:
@@ -554,13 +559,13 @@ class ALUTimingTool:
                 self.starting = True
                 print("Countdown started - Loading Race GUI")
                 self.ui.update_timer("00:00.000")
-                if self.ui.get_current_mode() == "Race vs Ghost":
+                ghost_loaded_now = self.race_data_manager.is_ghost_loaded()
+                if ghost_loaded_now:
                     self.ui.update_delta("=0.000")
-                    self.ui.update_background_color("Race vs Ghost", 0)
+                    self.ui.update_background_color(True, 0)
                 else:
                     self.ui.update_delta("−−.−−−")
-                ghost_loaded_now = self.race_data_manager.is_ghost_loaded()
-                self.ui.begin_race_display(self.ui.get_current_mode(), ghost_loaded_now)
+                self.ui.begin_race_display(ghost_loaded_now)
                 try:
                     self.ui.update_splits(0, 0.0)
                 except Exception:
@@ -580,7 +585,10 @@ class ALUTimingTool:
                 elif self.race_in_progress and not self.init:
                     self.race_in_progress = False
                     print("Returned to menus after race completion")
-                    self.race_data_manager.reset_race_data()
+                    # Do NOT call reset_race_data() here — the completed race data
+                    # must remain available so the user can still save it (including
+                    # the auto-reload path in _on_save_ghost).  The data is reset
+                    # naturally at the start of the next race via reset_race_state().
                 elif self.init:
                     print("Initial state: Menus")
                     self.current_timer_display = "00:00.000"
@@ -739,6 +747,11 @@ class ALUTimingTool:
             self.loop_times.append(elapsed_ms)
             self.avg_loop_time = sum(self.loop_times) / len(self.loop_times)
             self.ui.update_loop_time(elapsed_ms, self.avg_loop_time)
+
+        # Main loop exited — now safe to remove all hooks from game memory.
+        # This must run on the main thread AFTER the while loop to avoid racing
+        # with an in-progress _capture_addresses() call.
+        self.de_client.stop()
 
 
 if __name__ == "__main__":
