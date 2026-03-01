@@ -2766,7 +2766,7 @@ class TimingToolUI:
             cursor="hand2", padx=0,
         )
         orange_link.pack(side="left", padx=0)
-        orange_link.bind("<Button-1>", lambda e: webbrowser.open("https://example.com/orange"))
+        orange_link.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/tntcannon5000"))
         tk.Label(
             credits_frame, text=" & ",
             font=("Helvetica", _pf(10), "bold"), fg="#b4c6c8", bg="#1a1a2e",
@@ -2778,7 +2778,7 @@ class TimingToolUI:
             cursor="hand2", padx=0,
         )
         bholla_link.pack(side="left", padx=0)
-        bholla_link.bind("<Button-1>", lambda e: webbrowser.open("https://example.com/bholla64"))
+        bholla_link.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/bholla64"))
 
         # Ghost name label
         self.ghost_filename_label = tk.Label(
