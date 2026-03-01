@@ -33,7 +33,7 @@ def main():
         app = ALUTimingTool()
 
         print("=" * 50)
-        print("ALU Timing Tool initialized successfully!")
+        print("ALU Timing Tool initialized successfully! ")
         print("Reading game telemetry via direct process memory hooks.")
         print("Press Ctrl+C to stop the application.")
         print("=" * 50)
