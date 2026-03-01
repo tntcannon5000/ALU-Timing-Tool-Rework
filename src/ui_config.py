@@ -31,6 +31,10 @@ class UIConfigManager:
             "window_size": {"width": 300, "height": 120},
             "scaling": 1.15,
             "is_pinned": True,
+            "vel_mode": "Speed Off",
+            "gear_rpm_enabled": False,
+            "steering_enabled": False,
+            "vdelta_enabled": False,
         }
     
     def save_config(self, config: Dict) -> bool:

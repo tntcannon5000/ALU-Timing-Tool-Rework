@@ -511,7 +511,7 @@ class ALUTimingTool:
                 if self.race_completed or progress_raw > 0:
                     self.reset_race_state()
                 self.race_in_progress = True
-                self.ui.update_delta("=0.000")
+                self.ui.update_delta("+0.000")
                 self.ui.update_background_color(self.race_data_manager.is_ghost_loaded(), 0)
                 # Clear debounce clock — we're genuinely racing now.
                 self._last_starting_ts = None
@@ -561,7 +561,7 @@ class ALUTimingTool:
                 self.ui.update_timer("00:00.000")
                 ghost_loaded_now = self.race_data_manager.is_ghost_loaded()
                 if ghost_loaded_now:
-                    self.ui.update_delta("=0.000")
+                    self.ui.update_delta("+0.000")
                     self.ui.update_background_color(True, 0)
                 else:
                     self.ui.update_delta("−−.−−−")
