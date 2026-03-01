@@ -7,6 +7,7 @@ Visually based on the original v4 UI design, with v5 features (splits, pymem int
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from tkinter import font as tkfont
 import ctypes
 import shutil
 import threading
@@ -139,6 +140,11 @@ class TimingToolUI:
         # Delta display font base size (adjust this to change the main display text size)
         self.DELTA_FONT_BASE = 65
 
+        # Resolved font names — set by _resolve_fonts() once a root window exists.
+        # Fallbacks ensure correct rendering even when preferred fonts are absent.
+        self._font_speed_name: str = "Franklin Gothic Heavy"   # velocity/vdelta labels
+        self._font_split_name: str = "Bahnschrift Condensed"   # split-view rows
+
         # Scaling adjustment - load from config
         self.current_scaling = self.ui_config.get("scaling", 1.15)
 
@@ -181,6 +187,40 @@ class TimingToolUI:
         # can correctly initialise the Scale-1 slider (current_scaling is swapped to
         # dual_scaling during those calls; this preserves the real main-window value).
         self._dm_build_main_scaling: float | None = None
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  Font resolution
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _resolve_fonts(self):
+        """Resolve font names to the best available alternative on this system.
+
+        Some Windows fonts (e.g. Bahnschrift Condensed, Franklin Gothic Heavy)
+        are absent on older Windows builds or non-standard user profiles.  This
+        method picks the first available candidate from each preference list and
+        stores the result in instance variables so all widget constructors use
+        the same resolved name.
+        """
+        try:
+            available = set(tkfont.families())
+        except Exception:
+            available = set()
+
+        # Speed / velocity delta display (large numeric readout)
+        for candidate in ("Franklin Gothic Heavy", "Impact", "Arial Black", "Arial"):
+            if candidate in available:
+                self._font_speed_name = candidate
+                break
+        else:
+            self._font_speed_name = "Helvetica"
+
+        # Split-view row labels (condensed, narrow)
+        for candidate in ("Bahnschrift Condensed", "Bahnschrift", "Consolas", "Lucida Console"):
+            if candidate in available:
+                self._font_split_name = candidate
+                break
+        else:
+            self._font_split_name = "Helvetica"
 
     # ──────────────────────────────────────────────────────────────────────
     #  Configuration persistence
@@ -867,7 +907,6 @@ class TimingToolUI:
             self.vdelta_frame is not None
             and self.vdelta_enabled
             and ghost_is_loaded
-            and self.vel_mode != "Speed Off"
             and not self.vdelta_visible
         )
         if vdelta_will_show:
@@ -1400,7 +1439,7 @@ class TimingToolUI:
         self.vdelta_frame.columnconfigure(0, weight=1, uniform="vdcol")
         self.vdelta_frame.columnconfigure(1, weight=1, uniform="vdcol")
         # NOT packed until update_vdelta shows it
-        _vd_font = ("Franklin Gothic Heavy", 44)
+        _vd_font = (self._font_speed_name, 44)
         self.vdelta_label = tk.Label(
             self.vdelta_frame, text="+0.00",
             font=_vd_font,
@@ -1446,7 +1485,6 @@ class TimingToolUI:
             racing
             and self.vdelta_enabled
             and ghost_loaded
-            and self.vel_mode != "Speed Off"
         )
         has_vel = ghost_vel_raw is not None
 
@@ -1596,7 +1634,7 @@ class TimingToolUI:
         # NOT packed — only shown when update_velocity is called with racing=True
         self.velocity_label = tk.Label(
             self.velocity_frame, text="0.0",
-            font=("Franklin Gothic Heavy", 110),
+            font=(self._font_speed_name, 110),
             fg="#ecf0f1", bg="#1a1a2e", anchor="e",
         )
         self.velocity_label.pack(fill="x", padx=(4, 4), pady=0)
@@ -1797,6 +1835,7 @@ class TimingToolUI:
         # AND from live race-update paths (where current_scaling = main scaling).
         # Using dual_scaling unconditionally gives the correct result in both cases.
         font_size = -int(19 * self.dual_scaling) if self.dual_monitor else 19
+        _split_font = self._font_split_name
         index = 0
         for s_item in splits:
             row_bg = "#252540" if index % 2 == 0 else "#1a1a2e"
@@ -1814,26 +1853,26 @@ class TimingToolUI:
 
                 if not has_live and not has_ghost:
                     tk.Label(self.rows[index], text=name, bg=row_bg, fg="white", anchor='w',
-                            width=12, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                            width=12, font=(_split_font, font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
                     tk.Label(self.rows[index], text="", bg=row_bg, fg="#bdc3c7",
-                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
+                            width=6, anchor='e', font=(_split_font, font_size)).grid(row=0, column=1, sticky='e',pady=0)
                     tk.Label(self.rows[index], text="", bg=row_bg, fg="#bdc3c7",
-                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
+                            width=6, anchor='e', font=(_split_font, font_size)).grid(row=0, column=2, sticky='e',pady=0)
                     tk.Label(self.rows[index], text="", bg=row_bg, fg="#bdc3c7",
-                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+                            width=6, anchor='e', font=(_split_font, font_size)).grid(row=0, column=3, sticky='e',pady=0)
                     tk.Label(self.rows[index], text=percent, bg=row_bg, fg="#bdc3c7",
-                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=4, sticky='e',pady=0)
+                            width=6, anchor='e', font=(_split_font, font_size)).grid(row=0, column=4, sticky='e',pady=0)
                 elif not has_ghost:
                     tk.Label(self.rows[index], text=name, bg=row_bg, fg="white", anchor='w',
-                            width=12, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                            width=12, font=(_split_font, font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
                     tk.Label(self.rows[index], text="", bg=row_bg, fg="#bdc3c7",
-                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
+                            width=6, anchor='e', font=(_split_font, font_size)).grid(row=0, column=1, sticky='e',pady=0)
                     tk.Label(self.rows[index], text="", bg=row_bg, fg="#bdc3c7",
-                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
+                            width=6, anchor='e', font=(_split_font, font_size)).grid(row=0, column=2, sticky='e',pady=0)
                     tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg=row_bg, fg="#bdc3c7",
-                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+                            width=6, anchor='e', font=(_split_font, font_size)).grid(row=0, column=3, sticky='e',pady=0)
                     tk.Label(self.rows[index], text=percent, bg=row_bg, fg="#bdc3c7",
-                            width=6, anchor='e', font=("Bahnschrift Condensed", font_size)).grid(row=0, column=4, sticky='e',pady=0)
+                            width=6, anchor='e', font=(_split_font, font_size)).grid(row=0, column=4, sticky='e',pady=0)
                 else:
                     ghost_time = ghost[index]
                     best_time = best[index]
@@ -1849,16 +1888,16 @@ class TimingToolUI:
                     delta_us = current_time - best_time if current_time and best_time else 1
                     fg_color = "#C2AC09" if delta_us <= 0 else "white"
                     tk.Label(self.rows[index], text=name, bg=row_bg, fg=fg_color, anchor='w',
-                            width=12, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                            width=12, font=(_split_font, font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
                     delta_fg = fg_color if fg_color != "white" else "#2ecc71" if delta_display and delta_display.startswith('-') else "#e74c3c"
                     tk.Label(self.rows[index], text=delta_display, bg=row_bg, fg=delta_fg,
-                            width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='e',pady=0)
+                            width=6, font=(_split_font, font_size)).grid(row=0, column=1, sticky='e',pady=0)
                     tk.Label(self.rows[index], text=self._format_time_ms(current_time), bg=row_bg, fg=fg_color if fg_color != "white" else "#bdc3c7",
-                            anchor='e', width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
+                            anchor='e', width=6, font=(_split_font, font_size)).grid(row=0, column=2, sticky='e',pady=0)
                     tk.Label(self.rows[index], text=self._format_time_ms(ghost_time), bg=row_bg, fg=fg_color if fg_color != "white" else "#bdc3c7",
-                            anchor='e', width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=3, sticky='e',pady=0)
+                            anchor='e', width=6, font=(_split_font, font_size)).grid(row=0, column=3, sticky='e',pady=0)
                     tk.Label(self.rows[index], text=self._format_time_ms(best_time), bg=row_bg, fg=fg_color if fg_color != "white" else "#bdc3c7",
-                            anchor='e', width=6, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=4, sticky='e',pady=0)
+                            anchor='e', width=6, font=(_split_font, font_size)).grid(row=0, column=4, sticky='e',pady=0)
             index += 1
         if is_init: 
             self.rows.append(None) # placeholder to preserve indexing for later updates
@@ -1872,16 +1911,16 @@ class TimingToolUI:
         delta_us = best_possible_time - ghost_time if best_possible_time and ghost_time else None
         delta_display = self._format_delta_ms(delta_us) if delta_us else ""
         tk.Label(self.rows[index], text="Best Case:", bg=row_bg, fg="white", anchor='w',
-                width=9, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
+                width=9, font=(_split_font, font_size)).grid(row=0, column=0, sticky='w',padx=0,pady=0)
         delta_fg = "#2ecc71" if delta_display and delta_display.startswith('-') else "#e74c3c"
         tk.Label(self.rows[index], text=delta_display, bg=row_bg, fg=delta_fg,anchor='w',
-                width=7, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=1, sticky='w',pady=0)
+                width=7, font=(_split_font, font_size)).grid(row=0, column=1, sticky='w',pady=0)
         tk.Label(self.rows[index], text=self._format_time_ms(best_possible_time,False), bg=row_bg, fg="#bdc3c7",
-                anchor='w', width=7, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=2, sticky='e',pady=0)
+                anchor='w', width=7, font=(_split_font, font_size)).grid(row=0, column=2, sticky='e',pady=0)
         tk.Label(self.rows[index], text="Perfect:", bg=row_bg, fg="white", anchor='e',
-                width=7, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=5, sticky='e',padx=0,pady=0)
+                width=7, font=(_split_font, font_size)).grid(row=0, column=5, sticky='e',padx=0,pady=0)
         tk.Label(self.rows[index], text=self._format_time_ms(sum_of_best_splits,False), bg=row_bg, fg="#bdc3c7",
-                anchor='e', width=7, font=("Bahnschrift Condensed", font_size)).grid(row=0, column=6, sticky='e',pady=0)
+                anchor='e', width=7, font=(_split_font, font_size)).grid(row=0, column=6, sticky='e',pady=0)
 
 
 
@@ -2132,36 +2171,66 @@ class TimingToolUI:
             self.adjust_scaling(delta)
 
     # ──────────────────────────────────────────────────────────────────────
-    #  Drag support
+    #  Drag support  (unified — handles both main window and dual window)
     # ──────────────────────────────────────────────────────────────────────
+
+    # Interactive widget types that should NOT trigger window dragging
+    _DRAG_SKIP = (tk.Button, tk.Scale, ttk.Combobox, tk.Checkbutton,
+                  tk.Entry, tk.Spinbox, tk.Text)
 
     def start_drag(self, event):
-        if self.is_pinned: # Don't allow dragging when pinned
+        """Record the screen position where the drag started."""
+        if self.is_pinned:
             return
-        self.start_x = event.x
-        self.start_y = event.y
+        if isinstance(event.widget, self._DRAG_SKIP):
+            return
+        self.start_x = event.x_root
+        self.start_y = event.y_root
 
     def on_drag(self, event):
-        if self.is_pinned: # Don't allow dragging when pinned
+        """Move whichever window the dragged widget belongs to."""
+        if self.is_pinned:
             return
-        x = self.root.winfo_x() + (event.x - self.start_x)
-        y = self.root.winfo_y() + (event.y - self.start_y)
-        self.root.geometry(f"+{x}+{y}")
+        if isinstance(event.widget, self._DRAG_SKIP):
+            return
+        dx = event.x_root - self.start_x
+        dy = event.y_root - self.start_y
+        # Update origin every motion event so consecutive calls accumulate correctly
+        self.start_x = event.x_root
+        self.start_y = event.y_root
+        if dx == 0 and dy == 0:
+            return
+        try:
+            tl = event.widget.winfo_toplevel()
+        except Exception:
+            return
+        if tl is self.root:
+            x = self.root.winfo_x() + dx
+            y = self.root.winfo_y() + dy
+            self.root.geometry(f"+{x}+{y}")
+        elif self.dual_win and tl is self.dual_win:
+            x = self.dual_win.winfo_x() + dx
+            y = self.dual_win.winfo_y() + dy
+            self.dual_win.geometry(f"+{x}+{y}")
+
+    # Keep the old dual-drag names alive so any callers inside _create_* methods
+    # that set up explicit header bindings still work without change.
+    _dual_start_drag = start_drag
+    _dual_on_drag    = on_drag
+
+    def _on_right_click(self, event):
+        """Global right-click handler: toggle race panel for main window only."""
+        if isinstance(event.widget, self._DRAG_SKIP):
+            return
+        try:
+            if event.widget.winfo_toplevel() is self.root:
+                self.toggle_race_panel()
+        except Exception:
+            pass
 
     # ──────────────────────────────────────────────────────────────────────
-    #  Dual monitor window drag support
+    #  Dual window drag support  (alias — handled by unified methods above)
     # ──────────────────────────────────────────────────────────────────────
-
-    def _dual_start_drag(self, event):
-        self._dual_start_x = event.x
-        self._dual_start_y = event.y
-
-    def _dual_on_drag(self, event):
-        if self.is_pinned or not self.dual_win:
-            return
-        x = self.dual_win.winfo_x() + (event.x - self._dual_start_x)
-        y = self.dual_win.winfo_y() + (event.y - self._dual_start_y)
-        self.dual_win.geometry(f"+{x}+{y}")
 
     # ──────────────────────────────────────────────────────────────────────
     #  Dual monitor mode
@@ -2275,19 +2344,8 @@ class TimingToolUI:
             return True  # fail open — allow DM if the check is unavailable
 
     def toggle_dual_monitor(self):
-        """Enable or disable dual monitor mode."""
+        """Enable or disable dual window mode."""
         wants_dm = self.dual_monitor_var.get() if self.dual_monitor_var else not self.dual_monitor
-
-        if wants_dm and not self._has_second_monitor():
-            # Revert the checkbox and warn the user
-            if self.dual_monitor_var:
-                self.dual_monitor_var.set(False)
-            messagebox.showwarning(
-                "Dual Monitor",
-                "No second monitor detected.\n"
-                "Connect a second monitor before enabling Dual Monitor mode."
-            )
-            return
 
         # Auto-unpin both windows when switching modes so neither gets stranded
         if self.is_pinned:
@@ -2326,14 +2384,16 @@ class TimingToolUI:
             self.split_view_visible = False
             self.rows = []
 
-        # ── Position dual window: second monitor origin, or saved position ──
+        # ── Position dual window: saved position, or offset from main window ──
         try:
             saved_x = self.ui_config.get("dual_win_x")
             saved_y = self.ui_config.get("dual_win_y")
             if saved_x is None or saved_y is None:
-                saved_x, saved_y = self._get_second_monitor_origin()
+                # Default: place alongside the main window on the same monitor
+                saved_x = self.root.winfo_x() + self.root.winfo_width() + 10
+                saved_y = self.root.winfo_y()
         except Exception:
-            saved_x, saved_y = 0, 0
+            saved_x, saved_y = self.root.winfo_x(), self.root.winfo_y()
 
         self.dual_win = tk.Toplevel(self.root)
         self.dual_win.overrideredirect(True)
@@ -2369,6 +2429,14 @@ class TimingToolUI:
         finally:
             self.current_scaling = main_scaling
             self._dm_build_main_scaling = None
+
+        # Bind drag events on the dual window Toplevel so all content areas
+        # (split rows, labels, etc.) can reposition the window.
+        # bind_all already covers this since start_drag/on_drag check winfo_toplevel().
+        # The explicit bindings below are kept so the header frame drag targets
+        # inside _create_race_panel_content still reference valid methods.
+        self.dual_win.bind("<Button-1>", self.start_drag, add="+")
+        self.dual_win.bind("<B1-Motion>", self.on_drag, add="+")
 
         # Resize main window (removed race panel height)
         self._auto_resize()
@@ -2447,6 +2515,9 @@ class TimingToolUI:
 
         self.root.tk.call("tk", "scaling", self.current_scaling)
 
+        # Resolve font names now that a root window exists
+        self._resolve_fonts()
+
         # Keyboard shortcuts
         self.root.bind_all("<Control-plus>", lambda e: self.increase_scaling())
         self.root.bind_all("<Control-equal>", lambda e: self.increase_scaling())
@@ -2458,7 +2529,7 @@ class TimingToolUI:
 
         # Window geometry from config (force base height; panels restored separately)
         geometry = self.config_manager.get_window_geometry_from_config(self.ui_config)
-        base_h = int(55 * self.current_scaling)
+        base_h = int(70 * self.current_scaling)
         gparts = geometry.replace('x', '+').replace('+', ' ').split()
         self.root.geometry(f"{gparts[0]}x{base_h}+{gparts[2]}+{gparts[3]}")
         self.root.overrideredirect(True)
@@ -2498,12 +2569,6 @@ class TimingToolUI:
         self.delta_label.bind("<Button-1>", self.start_drag)
         self.delta_label.bind("<B1-Motion>", self.on_drag)
 
-        # Right-click anywhere on main area toggles race panel
-        main_container.bind('<Button-3>', self.toggle_race_panel)
-        main_ui_frame.bind('<Button-3>', self.toggle_race_panel)
-        self.main_display_frame.bind('<Button-3>', self.toggle_race_panel)
-        self.delta_label.bind('<Button-3>', self.toggle_race_panel)
-
         self.button_section = None
 
         # ── Race panel (hidden, packed below when toggled) ──
@@ -2529,7 +2594,25 @@ class TimingToolUI:
         self.race_panel_expanded = False
         self.toggle_race_panel()
 
-        # Restore dual monitor mode if it was saved as enabled.
+        # ── Global drag + right-click bindings ───────────────────────────────
+        # bind_all targets the universal "all" bindtag, so it fires for every
+        # widget in the application regardless of class bindings.  This covers
+        # Canvas widgets, overlay bars, split rows, etc. that would otherwise
+        # not propagate through the normal bindtag chain to the toplevel binding.
+        # The handlers inspect winfo_toplevel() to choose which window to move.
+        self.root.bind_all("<Button-1>", self.start_drag)
+        self.root.bind_all("<B1-Motion>", self.on_drag)
+        self.root.bind_all("<Button-3>", self._on_right_click)
+
+        # ── Defer a layout-correct rebuild to fix DPI/scaling inaccuracy ─────
+        # On Windows with per-monitor DPI awareness, Tk may silently override
+        # our tk.scaling call when the window is first mapped to the display.
+        # Scheduling adjust_scaling(0) via after_idle forces a full widget
+        # rebuild with the correct scale value after the initial render, so
+        # font sizes are accurate from the very first frame the user sees.
+        self.root.after_idle(lambda: self.adjust_scaling(0))
+
+        # Restore dual window mode if it was saved as enabled.
         if self.dual_monitor:
             self._open_dual_window()
 
@@ -2546,7 +2629,7 @@ class TimingToolUI:
         self.debug_expanded = False
 
         base_width = int(300 * self.current_scaling)
-        base_height = int(55 * self.current_scaling)
+        base_height = int(70 * self.current_scaling)
         # Always include position so _auto_resize reads correct X/Y coordinates.
         if saved_x is not None and saved_y is not None:
             self.root.geometry(f"{base_width}x{base_height}+{saved_x}+{saved_y}")
@@ -2588,11 +2671,6 @@ class TimingToolUI:
         self.delta_label.pack(side="top", fill="x")
         self.delta_label.bind("<Button-1>", self.start_drag)
         self.delta_label.bind("<B1-Motion>", self.on_drag)
-        # Right-click anywhere on main area toggles race panel
-        main_container.bind('<Button-3>', self.toggle_race_panel)
-        main_ui_frame.bind('<Button-3>', self.toggle_race_panel)
-        self.main_display_frame.bind('<Button-3>', self.toggle_race_panel)
-        self.delta_label.bind('<Button-3>', self.toggle_race_panel)
 
         self.button_section = None
 
@@ -2633,6 +2711,11 @@ class TimingToolUI:
         # race_panel_expanded was reset to False at the top of this method
         # (widget not packed), so toggle_race_panel() will flip it to True.
         self.toggle_race_panel()
+
+        # Re-bind drag and right-click on all widgets after full rebuild
+        self.root.bind_all("<Button-1>", self.start_drag)
+        self.root.bind_all("<B1-Motion>", self.on_drag)
+        self.root.bind_all("<Button-3>", self._on_right_click)
 
     # ──────────────────────────────────────────────────────────────────────
     #  Race panel content (2-column, matches old UI)
@@ -2870,7 +2953,7 @@ class TimingToolUI:
         # Dual Monitor checkbox (always enabled) — shown first
         self.dual_monitor_var = tk.BooleanVar(value=self.dual_monitor)
         tk.Checkbutton(
-            right_column, text="Dual Monitor", variable=self.dual_monitor_var,
+            right_column, text="Dual Window", variable=self.dual_monitor_var,
             command=self.toggle_dual_monitor,
             bg="#1a1a2e", fg="white", selectcolor="#1a1a1a",
             activebackground="#1a1a2e", activeforeground="#ecf0f1",
