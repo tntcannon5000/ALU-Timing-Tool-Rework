@@ -3,6 +3,11 @@ venv/
 venvbak/
 dataset/
 
+# Build artifacts
+build/
+dist/
+*.spec.bak
+
 # User config
 data/ui_config.json
 data/debug_log.txt

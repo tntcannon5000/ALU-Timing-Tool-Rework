@@ -8,6 +8,7 @@ import json
 import os
 import numpy as np
 from typing import Dict, Optional, List
+from .utils.paths import get_app_root
 
 
 class RaceDataManager:
@@ -38,7 +39,7 @@ class RaceDataManager:
         self.next_split_index: Optional[float] = None  # index of the next split
         self.new_split_available: bool = False
         # Ensure runs/ directory exists
-        self.runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
+        self.runs_dir = os.path.join(get_app_root(), "runs")
         os.makedirs(self.runs_dir, exist_ok=True)
         # Initialize empty race data for all percentages (0-100)
         self.reset_race_data()

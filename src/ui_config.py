@@ -8,6 +8,7 @@ import json
 import os
 import tkinter as tk
 from typing import Dict, Tuple, Optional
+from .utils.paths import get_app_root
 
 
 class UIConfigManager:
@@ -23,8 +24,8 @@ class UIConfigManager:
             config_file: Name of the configuration file
         """
         self.config_file = config_file
-        self.config_path = os.path.join(os.getcwd(), "data", config_file)
-        # Ensure the data/ directory exists so config can be written on first run
+        self.config_path = os.path.join(get_app_root(), "runs", config_file)
+        # Ensure the runs/ directory exists so config can be written on first run
         os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
         self.default_config = {
             "window_position": {"x": 100, "y": 100},

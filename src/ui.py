@@ -14,6 +14,7 @@ import sys
 import os
 import webbrowser
 from .ui_config import UIConfigManager
+from .utils.paths import get_app_root
 
 
 class TimingToolUI:
@@ -372,7 +373,7 @@ class TimingToolUI:
         """Open file dialog to load a ghost file."""
         if self.on_load_ghost:
             filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
-            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
+            runs_dir = os.path.join(get_app_root(), "runs")
             os.makedirs(runs_dir, exist_ok=True)
             filename = filedialog.askopenfilename(
                 title="Load Race Ghost",
@@ -433,7 +434,7 @@ class TimingToolUI:
         """Open file dialog to load a split-type ghost file."""
         if hasattr(self, 'on_load_split') and self.on_load_split:
             filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
-            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
+            runs_dir = os.path.join(get_app_root(), "runs")
             os.makedirs(runs_dir, exist_ok=True)
             filename = filedialog.askopenfilename(
                 title="Load Split Race Ghost",
@@ -448,7 +449,7 @@ class TimingToolUI:
         """Open file dialog to save current race data as ghost file."""
         if self.on_save_ghost:
             filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
-            runs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
+            runs_dir = os.path.join(get_app_root(), "runs")
             os.makedirs(runs_dir, exist_ok=True)
             # Default to the currently loaded ghost name so overwriting is one click.
             default_name = os.path.splitext(self._current_ghost_name)[0] if self._current_ghost_name else ""
