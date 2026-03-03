@@ -38,6 +38,10 @@ class RaceDataManager:
         self.is_split_loaded: bool = False
         self.next_split_index: Optional[float] = None  # index of the next split
         self.new_split_available: bool = False
+        # Set of split indices whose PB check should be skipped on next crossing.
+        # Populated by the "Reset" button in the Configure Splits dialog.
+        # Each index is removed from the set after it is used (one-time override).
+        self._reset_split_overrides: set = set()
         # Ensure runs/ directory exists
         self.runs_dir = os.path.join(get_app_root(), "runs")
         os.makedirs(self.runs_dir, exist_ok=True)
@@ -250,6 +254,169 @@ class RaceDataManager:
             print(f"Error calculating ghost splits: {e}")
             return None
 
+    def merge_best_splits_from_file(self, source_filepath: str) -> tuple:
+        """
+        Load *source_filepath*, validate that its split boundaries match the
+        currently-loaded ghost exactly, then import any split segment that is
+        faster than the current best.
+
+        Returns:
+            (True,  n_improved: int)   — success; n_improved segments replaced
+            (False, error_msg:  str)   — validation or I/O failure
+        """
+        import json as _json
+
+        # ── 1. Load source file ───────────────────────────────────────────
+        try:
+            with open(source_filepath, 'r') as f:
+                src_data = _json.load(f)
+        except Exception as e:
+            return False, f"Failed to read file: {e}"
+
+        src_splits          = src_data.get('splits')
+        src_split_prog_raw  = src_data.get('split_progress')
+        src_split_times_raw = src_data.get('split_times')
+        src_split_vels_raw  = src_data.get('split_velocities')
+
+        if not src_splits:
+            return False, "Selected file has no split configuration."
+        if src_split_prog_raw is None or src_split_times_raw is None:
+            return False, "Selected file has no split data."
+
+        src_prog  = np.array(src_split_prog_raw)
+        src_times = np.array(src_split_times_raw)
+        src_vels  = (
+            [float('nan') if v is None else float(v) for v in src_split_vels_raw]
+            if src_split_vels_raw is not None else None
+        )
+
+        # ── 2. Validate split boundaries match ───────────────────────────
+        if len(src_splits) != len(self.splits):
+            return False, (
+                f"Split count mismatch: current ghost has {len(self.splits)} splits, "
+                f"selected file has {len(src_splits)}."
+            )
+
+        def _norm(v):
+            if isinstance(v, float) and v <= 1.0:
+                return round(v, 6)
+            return round(float(v) / 100.0, 6)
+
+        for i, (cur_row, src_row) in enumerate(zip(self.splits, src_splits)):
+            cur_end = _norm(cur_row[1])
+            src_end = _norm(
+                src_row[1] if isinstance(src_row, (list, tuple)) and len(src_row) > 1
+                else src_row
+            )
+            if cur_end != src_end:
+                return False, (
+                    f"Split {i + 1} boundary mismatch: "
+                    f"current ends at {round(cur_end * 100)}%, "
+                    f"selected file ends at {round(src_end * 100)}%."
+                )
+
+        # ── 3. Compute source split durations ────────────────────────────
+        try:
+            src_durations = []
+            src_durations.append(int(src_times[src_prog == self.splits[0][1]][0]))
+            for i in range(1, len(self.splits)):
+                t_start = int(src_times[src_prog == self.splits[i - 1][1]][0])
+                t_end   = int(src_times[src_prog == self.splits[i][1]][0])
+                src_durations.append(t_end - t_start)
+        except Exception as e:
+            return False, f"Failed to read split times from source file: {e}"
+
+        # ── 4. Replace segments that are faster in the source ─────────────
+        n_improved = 0
+        for i in range(len(self.splits)):
+            if self.best_splits is None or i >= len(self.best_splits):
+                continue
+            if src_durations[i] < self.best_splits[i]:
+                self._apply_split_from_source(i, src_prog, src_times, src_vels)
+                n_improved += 1
+
+        if n_improved > 0:
+            self.save_split_data()
+            self.best_splits = self.get_ghost_splits()
+
+        return True, n_improved
+
+    def _apply_split_from_source(
+        self,
+        split_index: int,
+        src_progress: np.ndarray,
+        src_times: np.ndarray,
+        src_vels,  # list of floats or None
+    ) -> None:
+        """
+        Replace the split_index segment in self.split_progress / split_times
+        with the corresponding segment from the source arrays.
+
+        Mirrors save_current_split but reads from source data instead of
+        current live-race data.  Offsets are applied so time continuity is
+        preserved across adjacent (unmodified) segments.
+        """
+        new_split = self.splits[split_index][1]
+
+        # ── Beginning: everything up to and including prev_split ─────────
+        if split_index == 0:
+            prog_beginning  = np.array([0.0])
+            times_beginning = np.array([0])
+            vels_beginning  = [0.0]
+            prev_split      = 0.0
+        else:
+            prev_split      = self.splits[split_index - 1][1]
+            mask_beg        = self.split_progress <= prev_split
+            prog_beginning  = self.split_progress[mask_beg]
+            times_beginning = self.split_times[mask_beg]
+            if self.split_velocities is not None:
+                sv = np.array(self.split_velocities, dtype=float)
+                vels_beginning = list(sv[mask_beg])
+            else:
+                vels_beginning = [float('nan')] * len(prog_beginning)
+
+        # ── Middle: source segment (prev_split < progress <= new_split) ──
+        mask_mid    = (src_progress > prev_split) & (src_progress <= new_split)
+        prog_middle = src_progress[mask_mid]
+        times_middle = src_times[mask_mid].astype(float).copy()
+
+        if src_vels is not None:
+            sv_src = np.array(src_vels, dtype=float)
+            vels_middle = list(sv_src[mask_mid])
+        else:
+            vels_middle = [float('nan')] * len(prog_middle)
+
+        # Align source middle so it begins where the current beginning ends
+        if split_index > 0:
+            time_at_prev_current = float(times_beginning[-1])
+            time_at_prev_source  = float(src_times[src_progress == prev_split][0])
+            offset = time_at_prev_current - time_at_prev_source
+        else:
+            offset = 0.0
+        times_middle = times_middle + offset
+
+        # ── End: everything after new_split, re-offset for continuity ────
+        if split_index == len(self.splits) - 1:
+            prog_end  = np.array([])
+            times_end = np.array([])
+            vels_end  = []
+        else:
+            mask_end        = self.split_progress > new_split
+            prog_end        = self.split_progress[mask_end]
+            times_end       = self.split_times[mask_end].astype(float).copy()
+            old_time_at_new = float(self.split_times[self.split_progress == new_split][0])
+            new_time_at_new = float(times_middle[-1])
+            times_end       = times_end + (new_time_at_new - old_time_at_new)
+            if self.split_velocities is not None:
+                sv = np.array(self.split_velocities, dtype=float)
+                vels_end = list(sv[mask_end])
+            else:
+                vels_end = [float('nan')] * len(prog_end)
+
+        self.split_times     = np.concatenate((times_beginning, times_middle, times_end))
+        self.split_progress  = np.concatenate((prog_beginning,  prog_middle,  prog_end))
+        self.split_velocities = list(vels_beginning) + list(vels_middle) + list(vels_end)
+
     def save_current_split(self):
         """
         Save the current split times into the split_times array, replacing the old split time for the split that was just reached.
@@ -324,7 +491,11 @@ class RaceDataManager:
         except: total_time = time_at_new_split
         self.current_splits.append(time_at_new_split)
         if self.is_split_loaded:
-            if total_time < self.best_splits[self.next_split_index]:
+            forced = self.next_split_index in self._reset_split_overrides
+            if forced:
+                self._reset_split_overrides.discard(self.next_split_index)
+                self.save_current_split()
+            elif total_time < self.best_splits[self.next_split_index]:
                 self.save_current_split()
         self.new_split_available = True
         self.next_split_index += 1
@@ -353,8 +524,8 @@ class RaceDataManager:
             return False
         
         raw_splits = data.get('splits')
-        if raw_splits is not None and not (2 <= len(raw_splits) <= 10):
-            print("File does not contain split configuration with 2-10 splits")
+        if raw_splits is not None and not (2 <= len(raw_splits) <= 20):
+            print("File does not contain split configuration with 2-20 splits")
             return False
         
         split_progress = data.get('split_progress')
@@ -414,9 +585,18 @@ class RaceDataManager:
         try:
             if (self.ghost_velocity_data is not None
                     and len(self.ghost_velocity_data) == len(self.ghost_progress_data)):
-                ghost_time = self._hermite_interp_time(
-                    progress, self.ghost_progress_data, self.ghost_time_data, self.ghost_velocity_data
-                )
+                # Hermite spline is only beneficial for the very first segment
+                # (acceleration from a standing start where velocity ≈ 0).
+                # All subsequent segments are well-approximated by linear
+                # interpolation, which is significantly faster.
+                _idx = int(np.searchsorted(self.ghost_progress_data, progress, side='right')) - 1
+                _idx = max(0, min(_idx, len(self.ghost_progress_data) - 2))
+                if _idx == 0:
+                    ghost_time = self._hermite_interp_time(
+                        progress, self.ghost_progress_data, self.ghost_time_data, self.ghost_velocity_data
+                    )
+                else:
+                    ghost_time = float(np.interp(progress, self.ghost_progress_data, self.ghost_time_data))
             else:
                 ghost_time = float(np.interp(progress, self.ghost_progress_data, self.ghost_time_data))
             delta_us = current_time_us - ghost_time

@@ -1,8 +1,14 @@
-Minimise dependencies by removing easyocr for a faster alternative that does not need all of pytorch, or find a way to only bundle minimal pytorch  libraries
-Attempt teleportation in ALU by using memory manipulation packages and the script
-Implement data analytics by capturing the speedometer every frame, to then log acceleration to a graph as an optional add-on to the UI
-Implement save splicing and merging automatically in a 3rd mode called "splits" - autosaves PB splits, merges them into spliced ghost, and saves PB ghost as well (but prompts user as usual)
-Add additional optional UI during the race to show comparison to splits and also an option to race against "best possible time" ghost instead (and also configuration of "checkpoints" in the menu)
-Make a built-in function to convert ghosts from Bholla's file format to the JSON format, runs automatically if it detects a Bholla save file has been selected
-Detection system: run % change detection --> found % change --> start clock --> read % with CNN --> run detection on igt --> found time change --> stop clock --> read timer with CNN --> save % time as CNN_time - clock_delta
-(for above, "read % with CNN" can be moved to after "stop clock" for slightly more reliable performance)
+bundle the font in with the exe so that it works for all users
+fix the finish detection issue that zeyan noticed (early finish detection in PL by about .5 seconds), potentially caused by 1 frame of lag where the VT updated but nothing else did (since VT server side)
+fix failed finish detection that cdash observed (caused by wreck failsafe interacting with abnormally long server connection time at the finish line)
+make it compatible with windows store and epic games versions
+make a function to edit ghosts when the user accidentally messes them up somehow
+make the way that users interact with ghosts and splits easier and more intuitive
+make the ui always very clean and even, even when sliders aren't showing, etc
+make it more compatible with people who can't run 60 fps
+add back data logging to the exe
+make UI config not appear in the ghost selection menu
+add checkpoint and nitro %, make a nitro bar display that turns purple 0.2 seconds before full
+try to see if it's possible to make a checkpoint bar to show progress between checkpoints
+Try to find a better way to show half-width displays like vdelta, time gain ratio, and checkpoint(?), especially when there is an odd number of them
+settings menu with hotkeys and color options, maybe move some of the checkboxes there, also include reaction time settings and ghost settings

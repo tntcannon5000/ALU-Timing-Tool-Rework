@@ -247,6 +247,10 @@ def _jmp_back(stub_pos: int, target: int) -> bytes:
 
 _CODE_OFFSET = 64   # data area occupies the first 64 bytes
 
+# Offsets within the single Nitro-State alloc page (ON + OFF share one page)
+_NITRO_STATE_ON_CODE_OFF  = _CODE_OFFSET          # 64  — ON  trampoline
+_NITRO_STATE_OFF_CODE_OFF = _CODE_OFFSET + 128     # 192 — OFF trampoline
+
 
 def _build_dashboard_stub(alloc_base: int, return_addr: int) -> bytes:
     """
@@ -495,6 +499,144 @@ def _build_local_player_stub(alloc_base: int, return_addr: int) -> bytes:
     return bytes(bytearray(_CODE_OFFSET) + code)
 
 
+def _build_nitro_stub(alloc_base: int, return_addr: int) -> bytes:
+    """
+    Hook: movss [rbx+0x198],xmm1   (F3 0F 11 8B 98 01 00 00 — 8 bytes)
+
+    This instruction writes the current nitro level (0.0–1.0) to rbx+0x198.
+    XMM1 holds the exact float we want to capture.
+
+    Data layout at alloc_base:
+      +0 : NitroVal (float, 4 bytes) — raw IEEE-754 bits of nitro level.
+
+    Patch at hook site: E9 <rel32> 90 90 90  (5-byte JMP + 3 NOPs)
+    """
+    code_base = alloc_base + _CODE_OFFSET
+    code = bytearray()
+
+    def pos() -> int:
+        return code_base + len(code)
+
+    # ── original instruction: movss [rbx+0x198],xmm1 ─────────────────────
+    # F3 0F 11 8B 98 01 00 00
+    code += b"\xF3\x0F\x11\x8B\x98\x01\x00\x00"
+
+    # ── copy XMM1 float to NitroVal (+0) via rax ──────────────────────────
+    # push rax                                             50
+    code += b"\x50"
+    # movd eax,xmm1                                        66 0F 7E C8
+    code += b"\x66\x0F\x7E\xC8"
+    # mov [rip+XX],eax  — NitroVal                         89 05 <rel32>
+    code += b"\x89\x05"
+    code += _rel32(pos() + 4, alloc_base + 0)
+    # pop rax                                              58
+    code += b"\x58"
+
+    # ── JMP back ─────────────────────────────────────────────────────────
+    code += _jmp_back(pos(), return_addr)
+
+    return bytes(bytearray(_CODE_OFFSET) + code)
+
+
+def _build_nitro_on_off_page(
+    alloc_base: int,
+    on_return_addr: int,
+    off_return_addr: int,
+) -> bytearray:
+    """
+    Build a single 4 KB page containing both Nitro-State trampolines.
+
+    Hook 9  — ON  site: mov byte ptr [rdi+0x37D8],0x01  (7 bytes)
+    Hook 10 — OFF site: mov byte ptr [rdi+0x37D8],0x00  (7 bytes)
+
+    Data layout:
+      alloc_base + 0   : NitroIsActive (byte, 0=off / 1=on)
+
+    Code layout:
+      alloc_base + 64  : ON  trampoline
+      alloc_base + 192 : OFF trampoline
+
+    Both stubs write the flag with  C6 05 <rip-rel32> <imm8>  so no
+    general-purpose registers are clobbered.
+    """
+    page = bytearray(0x1000)
+    flag_addr = alloc_base + 0
+
+    # ── ON trampoline ─────────────────────────────────────────────────────
+    on_base = alloc_base + _NITRO_STATE_ON_CODE_OFF
+    on_code = bytearray()
+
+    def on_pos() -> int:
+        return on_base + len(on_code)
+
+    # Original: mov byte ptr [rdi+0x37D8], 0x01  (7 bytes)
+    on_code += b"\xC6\x87\xD8\x37\x00\x00\x01"
+    # Set flag=1: C6 05 <rip-rel32> 01  (7 bytes)
+    # After appending C6 05, the next instruction is at on_pos()+5
+    on_code += b"\xC6\x05"
+    on_code += _rel32(on_pos() + 5, flag_addr)
+    on_code += b"\x01"
+    on_code += _jmp_back(on_pos(), on_return_addr)
+
+    # ── OFF trampoline ────────────────────────────────────────────────────
+    off_base = alloc_base + _NITRO_STATE_OFF_CODE_OFF
+    off_code = bytearray()
+
+    def off_pos() -> int:
+        return off_base + len(off_code)
+
+    # Original: mov byte ptr [rdi+0x37D8], 0x00  (7 bytes)
+    off_code += b"\xC6\x87\xD8\x37\x00\x00\x00"
+    # Set flag=0: C6 05 <rip-rel32> 00  (7 bytes)
+    off_code += b"\xC6\x05"
+    off_code += _rel32(off_pos() + 5, flag_addr)
+    off_code += b"\x00"
+    off_code += _jmp_back(off_pos(), off_return_addr)
+
+    page[_NITRO_STATE_ON_CODE_OFF  : _NITRO_STATE_ON_CODE_OFF  + len(on_code)]  = on_code
+    page[_NITRO_STATE_OFF_CODE_OFF : _NITRO_STATE_OFF_CODE_OFF + len(off_code)] = off_code
+    return page
+
+
+def _build_cp_stub(alloc_base: int, return_addr: int) -> bytes:
+    """
+    Hook: mov eax,[r13+0x24C]   (41 8B 85 4C 02 00 00 — 7 bytes)
+
+    This instruction reads the current checkpoint integer from r13+0x24C.
+    We capture r13 so we can read the checkpoint directly each frame.
+
+    Data layout at alloc_base:
+      +0 : R13Base (qword, 8 bytes) — captured r13 register value.
+
+    Patch at hook site: E9 <rel32> 90 90  (5-byte JMP + 2 NOPs)
+    """
+    code_base = alloc_base + _CODE_OFFSET
+    code = bytearray()
+
+    def pos() -> int:
+        return code_base + len(code)
+
+    # ── original instruction: mov eax,[r13+0x24C] ────────────────────────
+    # 41 8B 85 4C 02 00 00
+    code += b"\x41\x8B\x85\x4C\x02\x00\x00"
+
+    # ── capture r13 → R13Base (+0) ────────────────────────────────────────
+    # push rax                                             50
+    code += b"\x50"
+    # mov rax,r13                                          4C 89 E8
+    code += b"\x4C\x89\xE8"
+    # mov [rip+XX],rax  — R13Base                          48 89 05 <rel32>
+    code += b"\x48\x89\x05"
+    code += _rel32(pos() + 4, alloc_base + 0)
+    # pop rax                                              58
+    code += b"\x58"
+
+    # ── JMP back ─────────────────────────────────────────────────────────
+    code += _jmp_back(pos(), return_addr)
+
+    return bytes(bytearray(_CODE_OFFSET) + code)
+
+
 def _build_steering_stub(alloc_base: int, return_addr: int) -> bytes:
     """
     Hook: movss [rsi+0x1540],xmm1   (F3 0F 11 8E 40 15 00 00 — 8 bytes)
@@ -595,7 +737,35 @@ class DataExtractor:
         b"\xF3\x0F\x11\x8E\x40\x15\x00\x00\x48\x63\x48"
     )  # movss [rsi+0x1540],xmm1 + first 3 bytes of next instruction
 
-    PROCESS_NAME = "Asphalt9_Steam_x64_rtl.exe"
+    # Hook 7 — Nitro (permanent): movss [rbx+0x198],xmm1
+    # XMM1 = nitro level float 0.0–1.0 — 8-byte instruction → JMP(5) + NOP×3
+    _AOB_NITRO = re.escape(b"\xF3\x0F\x11\x8B\x98\x01\x00\x00")
+
+    # Hook 8 — CP (permanent): mov eax,[r13+0x24C]
+    # Captures r13 so we can read r13+0x24C each frame — 7-byte → JMP(5) + NOP×2
+    _AOB_CP = re.escape(b"\x41\x8B\x85\x4C\x02\x00\x00")
+
+    # Hook 9 — Nitro ON  (permanent): mov byte ptr [rdi+0x37D8],0x01
+    # 7-byte instruction → JMP(5) + NOP×2
+    _AOB_NITRO_ON = re.escape(
+        b"\xC6\x87\xD8\x37\x00\x00\x01\x48\x8B\x44\x24\x30"
+    )
+
+    # Hook 10 — Nitro OFF (permanent): mov byte ptr [rdi+0x37D8],0x00
+    # 7-byte instruction → JMP(5) + NOP×2
+    _AOB_NITRO_OFF = re.escape(
+        b"\xC6\x87\xD8\x37\x00\x00\x00\x4C\x8B\x74\x24\x48"
+    )
+
+    # Process names for each store variant.  _attach() tries them in order.
+    PROCESS_NAMES = [
+        "Asphalt9_Steam_x64_rtl.exe",   # Steam
+        "Asphalt9_gdk_x64_rtl.exe",     # Windows Store (gdk)
+        "Asphalt9_epic_x64_rtl.exe",    # Epic Games
+    ]
+    # Backward-compat alias — reflects whichever process was actually found.
+    # Set to the Steam name by default; overwritten by _attach() at runtime.
+    PROCESS_NAME = PROCESS_NAMES[0]
 
     # Safety hard cap for the capture poll loop (seconds).  The loop normally exits
     # as soon as VT leaves 0 (race started → hooks fire, or user quit → VT=1M).
@@ -618,6 +788,7 @@ class DataExtractor:
         self._pm:     Optional[pymem.Pymem] = None
         self._base:   int                   = 0
         self._module                        = None
+        self._active_process_name: Optional[str] = None  # set by _attach()
 
         # ── Permanent VT hook ────────────────────────────────────────────
         self._alloc_vt:     Optional[int] = None   # stub page for VT
@@ -630,6 +801,26 @@ class DataExtractor:
         self._inj_steering:       Optional[int] = None
         self._saved_steering:     dict          = {}
         self._steering_installed: bool          = False
+
+        # ── Permanent Nitro hook ──────────────────────────────────────────
+        self._alloc_nitro:     Optional[int] = None
+        self._inj_nitro:       Optional[int] = None
+        self._saved_nitro:     dict          = {}
+        self._nitro_installed: bool          = False
+
+        # ── Permanent CP hook ─────────────────────────────────────────────
+        self._alloc_cp:     Optional[int] = None
+        self._inj_cp:       Optional[int] = None
+        self._saved_cp:     dict          = {}
+        self._cp_installed: bool          = False
+        self._r13_base:     Optional[int] = None  # captured r13 for CP reads
+
+        # ── Permanent Nitro-State hooks (ON + OFF share one alloc page) ──
+        self._alloc_nitro_on:       Optional[int] = None
+        self._inj_nitro_on:         Optional[int] = None
+        self._inj_nitro_off:        Optional[int] = None
+        self._saved_nitro_state:    dict          = {}  # saves for both patches
+        self._nitro_on_installed:   bool          = False
 
         # ── Captured struct base addresses (set after _capture_addresses) ──
         # Each hook uses a DIFFERENT rdi pointing to a different game object:
@@ -685,6 +876,9 @@ class DataExtractor:
         self._visual_timer:  int   = 1000000
         self._velocity_raw:  float = 0.0
         self._steering_raw:  float = 0.0
+        self._nitro_raw:        float = 0.0
+        self._nitro_active_raw: int   = 0
+        self._checkpoint:       int   = 0
         self._connected:     bool  = False
         self._last_ok:       float = 0.0
 
@@ -703,21 +897,30 @@ class DataExtractor:
         Non-blocking — if the game is not running yet, read() will retry
         attach and hook installation on each call automatically.
         """
-        print(f"[DataExtractor] Starting — targeting {self.PROCESS_NAME}")
+        print(f"[DataExtractor] Starting — targeting {self.PROCESS_NAMES}")
         if self._pm is None:
             self._attach()
         if self._pm is not None and not self._vt_installed:
             self._install_vt_hook()
         if self._pm is not None and not self._steering_installed:
             self._install_steering_hook()
+        if self._pm is not None and not self._nitro_installed:
+            self._install_nitro_hook()
+        if self._pm is not None and not self._cp_installed:
+            self._install_cp_hook()
+        if self._pm is not None and not self._nitro_on_installed:
+            self._install_nitro_on_hook()
         if self._pm is not None and self._local_struct_offset == 0:
             self._read_local_struct_offset()
 
     def stop(self) -> None:
-        """Remove all hooks (permanent VT + steering + any live temporary hooks) and release resources."""
+        """Remove all hooks (permanent VT + steering + nitro + cp + any live temporary hooks) and release resources."""
         # Signal the capture poll loop to abort immediately if it is running.
         self._stop_event.set()
         self._emergency_remove_temp_hooks()
+        self._remove_nitro_on_hook()
+        self._remove_cp_hook()
+        self._remove_nitro_hook()
         self._remove_steering_hook()
         self._remove_vt_hook()
         print("[DataExtractor] Stopped")
@@ -740,6 +943,9 @@ class DataExtractor:
                 "visual_timer": self._visual_timer,
                 "velocity_raw": self._velocity_raw,
                 "steering_raw": self._steering_raw,
+                "nitro_raw":    self._nitro_raw,
+                "nitro_on":     self._nitro_active_raw,
+                "checkpoint":   self._checkpoint,
             }
 
     def get_timer_ms(self) -> int:
@@ -790,20 +996,29 @@ class DataExtractor:
     # -----------------------------------------------------------------------
 
     def _attach(self) -> bool:
-        """Open the game process and record the module base address."""
-        try:
-            self._pm     = pymem.Pymem(self.PROCESS_NAME)
-            self._module = pymem.process.module_from_name(
-                self._pm.process_handle, self.PROCESS_NAME
-            )
-            self._base = self._module.lpBaseOfDll
-            print(f"[DataExtractor] Attached to {self.PROCESS_NAME} "
-                  f"(base={self._base:#x})")
-            return True
-        except Exception as exc:
-            self._pm = None
-            self._last_fail_reason = f"attach_failed: {exc}"
-            return False
+        """Open the game process and record the module base address.
+
+        Tries each name in PROCESS_NAMES in order (Steam → GDK → Epic).
+        Whichever matches first is used for the rest of the session.
+        """
+        last_exc: Exception = Exception("no candidates")
+        for name in self.PROCESS_NAMES:
+            try:
+                pm     = pymem.Pymem(name)
+                module = pymem.process.module_from_name(pm.process_handle, name)
+                self._pm                   = pm
+                self._module               = module
+                self._base                 = module.lpBaseOfDll
+                self._active_process_name  = name
+                print(f"[DataExtractor] Attached to {name} "
+                      f"(base={self._base:#x})")
+                return True
+            except Exception as exc:
+                last_exc = exc
+                continue
+        self._pm = None
+        self._last_fail_reason = f"attach_failed: {last_exc}"
+        return False
 
     def _read_local_struct_offset(self) -> None:
         """
@@ -1073,6 +1288,174 @@ class DataExtractor:
             self._alloc_steering     = None
         self._inj_steering       = None
         self._steering_installed = False
+
+    def _install_nitro_hook(self) -> bool:
+        """
+        Install the permanent nitro level trampoline.
+
+        Scans for movss [rbx+0x198],xmm1 and hooks it to capture the nitro
+        float (0.0–1.0) in XMM1 on every write.
+        Returns True on success.
+        """
+        if not self._pm:
+            return False
+        handle = self._pm.process_handle
+
+        inj = self._aob_scan(self._AOB_NITRO)
+        if inj is None:
+            print(f"[DataExtractor] ⚠ Nitro AOB not found — nitro display unavailable "
+                  f"(reason: {self._last_fail_reason})")
+            return False
+
+        print(f"[DataExtractor] Nitro hook: installing at {inj:#x}")
+        alloc = _valloc_near(handle, inj)
+        self._alloc_nitro = alloc
+
+        stub = _build_nitro_stub(alloc, inj + 8)
+        self._pm.write_bytes(alloc, stub, len(stub))
+
+        # 8-byte instruction → JMP(5) + NOP×3
+        patch = _jmp_rel32(inj, alloc + _CODE_OFFSET) + b"\x90\x90\x90"
+        self._write_patch(inj, patch, self._saved_nitro)
+
+        self._inj_nitro       = inj
+        self._nitro_installed = True
+        print(f"[DataExtractor] ✓ Nitro hook (permanent) installed @ {inj:#x} "
+              f"→ stub @ {alloc + _CODE_OFFSET:#x}, data @ {alloc:#x}")
+        return True
+
+    def _remove_nitro_hook(self) -> None:
+        """Remove the permanent nitro hook and free its allocation."""
+        if not self._pm:
+            return
+        if self._saved_nitro:
+            self._restore_patches(self._saved_nitro)
+        if self._alloc_nitro:
+            try:
+                _vfree(self._pm.process_handle, self._alloc_nitro)
+            except Exception:
+                pass
+            self._alloc_nitro     = None
+        self._inj_nitro       = None
+        self._nitro_installed = False
+
+    def _install_cp_hook(self) -> bool:
+        """
+        Install the permanent checkpoint trampoline.
+
+        Scans for mov eax,[r13+0x24C] and hooks it to capture r13 so we
+        can read r13+0x24C (uint32 checkpoint index) each frame.
+        Returns True on success.
+        """
+        if not self._pm:
+            return False
+        handle = self._pm.process_handle
+
+        inj = self._aob_scan(self._AOB_CP)
+        if inj is None:
+            print(f"[DataExtractor] ⚠ CP AOB not found — checkpoint display unavailable "
+                  f"(reason: {self._last_fail_reason})")
+            return False
+
+        print(f"[DataExtractor] CP hook: installing at {inj:#x}")
+        alloc = _valloc_near(handle, inj)
+        self._alloc_cp = alloc
+
+        stub = _build_cp_stub(alloc, inj + 7)
+        self._pm.write_bytes(alloc, stub, len(stub))
+
+        # 7-byte instruction → JMP(5) + NOP×2
+        patch = _jmp_rel32(inj, alloc + _CODE_OFFSET) + b"\x90\x90"
+        self._write_patch(inj, patch, self._saved_cp)
+
+        self._inj_cp       = inj
+        self._cp_installed = True
+        print(f"[DataExtractor] ✓ CP hook (permanent) installed @ {inj:#x} "
+              f"→ stub @ {alloc + _CODE_OFFSET:#x}, data @ {alloc:#x}")
+        return True
+
+    def _install_nitro_on_hook(self) -> bool:
+        """
+        Install the permanent Nitro-State trampoline pair (ON + OFF).
+
+        Both trampolines live in a single alloc page:
+          ON  site: mov byte ptr [rdi+0x37D8],0x01  → sets NitroIsActive=1
+          OFF site: mov byte ptr [rdi+0x37D8],0x00  → sets NitroIsActive=0
+
+        The shared flag byte is at alloc_base + 0 and is read each frame.
+        Returns True on success (both sites found and patched).
+        """
+        if not self._pm:
+            return False
+        handle = self._pm.process_handle
+
+        inj_on = self._aob_scan(self._AOB_NITRO_ON)
+        if inj_on is None:
+            print(f"[DataExtractor] ⚠ Nitro-ON AOB not found — nitro_on unavailable "
+                  f"(reason: {self._last_fail_reason})")
+            return False
+
+        inj_off = self._aob_scan(self._AOB_NITRO_OFF)
+        if inj_off is None:
+            print(f"[DataExtractor] ⚠ Nitro-OFF AOB not found — nitro_on unavailable "
+                  f"(reason: {self._last_fail_reason})")
+            return False
+
+        print(f"[DataExtractor] Nitro-State hooks: ON @ {inj_on:#x}, OFF @ {inj_off:#x}")
+        alloc = _valloc_near(handle, inj_on)
+        self._alloc_nitro_on = alloc
+
+        page = _build_nitro_on_off_page(alloc, inj_on + 7, inj_off + 7)
+        self._pm.write_bytes(alloc, bytes(page), len(page))
+
+        # ON patch: JMP(5) + NOP×2 (7-byte site)
+        patch_on = _jmp_rel32(inj_on, alloc + _NITRO_STATE_ON_CODE_OFF) + b"\x90\x90"
+        self._write_patch(inj_on, patch_on, self._saved_nitro_state)
+
+        # OFF patch: JMP(5) + NOP×2 (7-byte site)
+        patch_off = _jmp_rel32(inj_off, alloc + _NITRO_STATE_OFF_CODE_OFF) + b"\x90\x90"
+        self._write_patch(inj_off, patch_off, self._saved_nitro_state)
+
+        self._inj_nitro_on      = inj_on
+        self._inj_nitro_off     = inj_off
+        self._nitro_on_installed = True
+        print(f"[DataExtractor] ✓ Nitro-State hooks installed "
+              f"(flag @ {alloc:#x}, ON code @ {alloc + _NITRO_STATE_ON_CODE_OFF:#x}, "
+              f"OFF code @ {alloc + _NITRO_STATE_OFF_CODE_OFF:#x})")
+        return True
+
+    def _remove_nitro_on_hook(self) -> None:
+        """Remove both Nitro-State patches and free the shared alloc page."""
+        if not self._pm:
+            return
+        if self._saved_nitro_state:
+            self._restore_patches(self._saved_nitro_state)
+        if self._alloc_nitro_on:
+            try:
+                _vfree(self._pm.process_handle, self._alloc_nitro_on)
+            except Exception:
+                pass
+            self._alloc_nitro_on = None
+        self._inj_nitro_on       = None
+        self._inj_nitro_off      = None
+        self._nitro_on_installed  = False
+        self._saved_nitro_state   = {}
+
+    def _remove_cp_hook(self) -> None:
+        """Remove the permanent CP hook and free its allocation."""
+        if not self._pm:
+            return
+        if self._saved_cp:
+            self._restore_patches(self._saved_cp)
+        if self._alloc_cp:
+            try:
+                _vfree(self._pm.process_handle, self._alloc_cp)
+            except Exception:
+                pass
+            self._alloc_cp     = None
+        self._inj_cp       = None
+        self._cp_installed = False
+        self._r13_base     = None
 
     def _emergency_remove_temp_hooks(self) -> None:
         """
@@ -1635,6 +2018,18 @@ class DataExtractor:
             if not self._install_vt_hook():
                 return False
 
+        # Lazily install optional permanent hooks if not yet done
+        if not self._steering_installed:
+            self._install_steering_hook()
+        if not self._nitro_installed:
+            self._install_nitro_hook()
+        if not self._cp_installed:
+            self._install_cp_hook()
+        if not self._nitro_on_installed:
+            self._install_nitro_on_hook()
+        if self._local_struct_offset == 0:
+            self._read_local_struct_offset()
+
         # ── 3. Read Visual Timer from permanent stub ───────────────────
         try:
             current_vt: int = self._pm.read_uint(self._alloc_vt)
@@ -1707,6 +2102,9 @@ class DataExtractor:
         gear:         int   = 0
         velocity_raw: float = 0.0
         steering_raw: float = 0.0
+        nitro_raw:       float = 0.0
+        nitro_on_raw:    int   = 0
+        checkpoint:      int   = 0
 
         # Read steering from permanent stub (always active when installed)
         if self._steering_installed and self._alloc_steering:
@@ -1715,6 +2113,33 @@ class DataExtractor:
                 # Clamp and sanitise — catch NaN/Inf from uninitialised stub memory
                 if -2.0 <= s <= 2.0:
                     steering_raw = max(-1.0, min(1.0, s))
+            except Exception:
+                pass
+
+        # Read nitro from permanent stub (float at alloc+0)
+        if self._nitro_installed and self._alloc_nitro:
+            try:
+                n = self._pm.read_float(self._alloc_nitro)
+                if 0.0 <= n <= 1.0:
+                    nitro_raw = n
+            except Exception:
+                pass
+
+        # Read Nitro-State flag (byte at alloc_nitro_on+0: 0=off, 1=on)
+        if self._nitro_on_installed and self._alloc_nitro_on:
+            try:
+                b = self._pm.read_uchar(self._alloc_nitro_on)
+                nitro_on_raw = 1 if b else 0
+            except Exception:
+                pass
+
+        # Update r13 base from CP stub and read checkpoint (uint32 at r13+0x24C)
+        if self._cp_installed and self._alloc_cp:
+            try:
+                r13 = self._pm.read_ulonglong(self._alloc_cp)
+                if r13 and r13 > 0x10000:
+                    self._r13_base = r13
+                    checkpoint = self._pm.read_uint(r13 + 0x24C)
             except Exception:
                 pass
 
@@ -1803,6 +2228,27 @@ class DataExtractor:
                             steering_raw = max(-1.0, min(1.0, s))
                     except Exception:
                         pass
+                if self._nitro_installed and self._alloc_nitro:
+                    try:
+                        n = self._pm.read_float(self._alloc_nitro)
+                        if 0.0 <= n <= 1.0:
+                            nitro_raw = n
+                    except Exception:
+                        pass
+                if self._nitro_on_installed and self._alloc_nitro_on:
+                    try:
+                        b = self._pm.read_uchar(self._alloc_nitro_on)
+                        nitro_on_raw = 1 if b else 0
+                    except Exception:
+                        pass
+                if self._cp_installed and self._alloc_cp:
+                    try:
+                        r13 = self._pm.read_ulonglong(self._alloc_cp)
+                        if r13 and r13 > 0x10000:
+                            self._r13_base = r13
+                            checkpoint = self._pm.read_uint(r13 + 0x24C)
+                    except Exception:
+                        pass
             except Exception:
                 pass  # keep first-read values if second read fails
 
@@ -1814,6 +2260,9 @@ class DataExtractor:
             "visual_timer": current_vt,
             "velocity_raw": velocity_raw,
             "steering_raw": steering_raw,
+            "nitro_raw":    nitro_raw,
+            "nitro_on":     nitro_on_raw,
+            "checkpoint":   checkpoint,
             "physics_update": changed
         }
         self._prev_vals = new_vals
@@ -1827,16 +2276,8 @@ class DataExtractor:
             self._gear         = gear
             self._velocity_raw = velocity_raw
             self._steering_raw = steering_raw
-            self._visual_timer = current_vt
-            self._connected    = True
-            self._last_ok      = time.time()
-
-        if not self._first_read_logged and self._direct_mode:
-            print(
-                f"[DataExtractor] First direct read: "
-                f"timer={timer_raw}, progress={progress:.4f}, gear={gear}, "
-                f"vt={current_vt}, rpm={rpm}, velocity={velocity_raw:.1f}"
-            )
-            self._first_read_logged = True
+            self._nitro_raw        = nitro_raw
+            self._nitro_active_raw = nitro_on_raw
+            self._checkpoint       = checkpoint
 
         return new_vals

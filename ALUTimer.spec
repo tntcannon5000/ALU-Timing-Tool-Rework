@@ -18,7 +18,9 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],                # No external data bundled — runs/ created at runtime
+    datas=[
+        ('assets/FRAHV.TTF', 'assets'),  # bundled Franklin Gothic Heavy font
+    ],
     hiddenimports=[
         'pymem',
         'pymem.process',

@@ -53,5 +53,6 @@ echo Output: dist\ALU Timer.exe
 echo.
 echo The exe is fully standalone. It creates a "runs" folder
 echo next to itself on first launch for ghosts and config.
+echo Debug output is written to runs\debug_log.txt.
 echo.
 pause

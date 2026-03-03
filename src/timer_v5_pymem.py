@@ -78,19 +78,19 @@ class ALUTimingTool:
         self._finish_locked: bool = False
         self._final_timer_us: int = 0   # last timer while racing ("true final")
 
-        # Multiplayer wreck failsafe
-        # When the PL finish trigger fires we don't commit the estimate
-        # immediately.  Instead we start a 2-second check:
-        #   "waiting_2s"       — waiting to see if the timer stops (real finish)
-        #   "waiting_progress" — 2s elapsed with timer still running; waiting
-        #                        for progress to resume before deciding
-        self._pl_wreck_check_state: Optional[str] = None
-        self._pl_wreck_check_ts: Optional[float] = None
+        # Multiplayer finish detection
+        # Keep updating _pl_stale_estimate every tick where timer advances but
+        # progress is stalled at >99%.  Once the timer stops, require 2
+        # consecutive frames to confirm, then validate against the estimate.
         self._pl_stale_estimate: Optional[int] = None
+        self._pl_timer_stopped_frames: int = 0
 
         # Guard against stale progress: memory keeps 100% from race N-1.
         # Only allow finish detection once we've seen progress < 50% this race.
         self._progress_legitimized: bool = False
+
+        # Auto-finish: timer captured the first time progress > 0.99999 this race.
+        self._high_progress_timer_us: Optional[int] = None
 
         # Change-detection trackers
         self._prev_timer_us: int = 0
@@ -202,10 +202,10 @@ class ALUTimingTool:
         # Signal the DataExtractor to abort any in-progress capture poll loop.
         # The actual hook removal (de_client.stop) is called from run_main_loop
         # *after* the while loop exits, ensuring no race with _capture_addresses.
+        # NOTE: do NOT join ui_thread here — this method is called FROM the UI
+        # thread (via close_app → on_close), so joining it would block forever.
         self.de_client._stop_event.set()
-        if hasattr(self, "ui_thread") and self.ui_thread and self.ui_thread.is_alive():
-            self.ui_thread.join(timeout=1.0)
-        print("All threads shutdown complete")
+        print("Shutdown signal sent — main loop will call de_client.stop() on exit")
 
     def stop(self):
         if not self.shutdown_in_progress:
@@ -318,6 +318,8 @@ class ALUTimingTool:
             progress_increased = progress > prev_progress
             if timer_increased and not progress_increased:
                 return prev_timer_us
+            elif not timer_increased:
+                return 0
         return None
 
     # ------------------------------------------------------------------
@@ -382,9 +384,9 @@ class ALUTimingTool:
         self.last_delta_s = None
         self._last_starting_ts = None
         self._starting_display_shown = False
-        self._pl_wreck_check_state = None
-        self._pl_wreck_check_ts = None
         self._pl_stale_estimate = None
+        self._pl_timer_stopped_frames = 0
+        self._high_progress_timer_us = None
         self.race_data_manager.reset_race_data()
         self.ui.update_save_ghost_button_state()
         self.ui.set_pb_detected(False)
@@ -483,6 +485,9 @@ class ALUTimingTool:
             velocity_raw   = vals.get("velocity_raw", 0.0)
             physics_update = vals.get("physics_update", False)
             steering_raw   = vals.get("steering_raw", 0.0)
+            nitro_raw      = vals.get("nitro_raw", 0.0)
+            nitro_on       = vals.get("nitro_on", 0)
+            checkpoint     = vals.get("checkpoint", 0)
             self.last_velocity_raw = velocity_raw
             if race_state_val == 1000000:
                 self.end_init()
@@ -540,6 +545,8 @@ class ALUTimingTool:
                 self.ui.update_velocity(0.0, False)
                 self.ui.update_steering(0.0, False)
                 self.ui.update_vdelta(0.0, None, False)
+                self.ui.update_nitro(0.0, False)
+                self.ui.update_cp(0, 0.0, False)
                 self.ui.restore_race_panel()
             elif game_state == "ended_pl" and prev_game_state == "racing_pl":
                 if not self.race_completed and self.race_in_progress:
@@ -550,6 +557,8 @@ class ALUTimingTool:
                 self.ui.update_velocity(0.0, False)
                 self.ui.update_steering(0.0, False)
                 self.ui.update_vdelta(0.0, None, False)
+                self.ui.update_nitro(0.0, False)
+                self.ui.update_cp(0, 0.0, False)
                 self.ui.restore_race_panel()
 
             if game_state == "starting" and prev_game_state != "starting":
@@ -606,6 +615,8 @@ class ALUTimingTool:
                     self.ui.update_velocity(0.0, False)
                     self.ui.update_steering(0.0, False)
                     self.ui.update_vdelta(0.0, None, False)
+                    self.ui.update_nitro(0.0, False)
+                    self.ui.update_cp(0, 0.0, False)
                     self.ui.auto_hide_race_overlays()
                     self.ui.schedule_split_view_reset()
                     self._last_starting_ts = None
@@ -625,6 +636,8 @@ class ALUTimingTool:
                     self.ui.update_velocity(0.0, False)
                     self.ui.update_steering(0.0, False)
                     self.ui.update_vdelta(0.0, None, False)
+                    self.ui.update_nitro(0.0, False)
+                    self.ui.update_cp(0, 0.0, False)
                     self.ui.auto_hide_race_overlays()
                     self.ui.schedule_split_view_reset()
             prev_game_state = game_state
@@ -637,9 +650,8 @@ class ALUTimingTool:
                 self.estimated_finish_us = None
                 self._finish_locked = False
                 self._progress_legitimized = False
-                self._pl_wreck_check_state = None
-                self._pl_wreck_check_ts = None
                 self._pl_stale_estimate = None
+                self._pl_timer_stopped_frames = 0
 
             float_pct = round(progress_raw * 100, 2) if 0.0 <= progress_raw <= 1.0 else round(progress_raw, 2)
             if float_pct < 50.0 and self.race_in_progress:
@@ -648,48 +660,58 @@ class ALUTimingTool:
                 self._progress_legitimized = True
             if actively_racing and not self.race_completed:
                 self._final_timer_us = timer_raw_us
-            if not self._finish_locked and self._progress_legitimized and is_pl:
-                finish_us = self._check_finish_trigger_new(
+            # -- Multiplayer finish detection ----------------------------
+            # Run every tick.  Since progress can only ever increase, once
+            # we are above 99% we stay there — no wreck clearing needed.
+            # * result > 0  → timer advancing, progress stalled: keep updating estimate
+            # * result == 0 → timer stopped at >99%: count consecutive frames
+            # * result None → below 99%: reset counter
+            # After 2 consecutive stopped frames, validate estimate:
+            #   if estimate is >0.8 s before timer_at_stop  → use estimate
+            #   else                                         → timer_at_stop − 1 s
+            if self._progress_legitimized and is_pl and not self._finish_locked:
+                _ft_result = self._check_finish_trigger_new(
                     progress_raw, self._prev_progress, timer_raw_us, self._prev_timer_us
                 )
-                if finish_us is not None:
-                    # Don't commit immediately — start 2-second wreck check
-                    self._pl_stale_estimate = finish_us
-                    self._pl_wreck_check_state = "waiting_2s"
-                    self._pl_wreck_check_ts = systime.perf_counter()
-                    self._finish_locked = True
-                    print(f"Finish candidate (PL) — starting wreck check: {self._format_timer(finish_us)}")
-
-            # -- Multiplayer wreck failsafe --------------------------------
-            # Delayed commit: only set estimated_finish_us once we are
-            # confident the finish wasn't a wreck false-positive.
-            if is_pl and self._pl_wreck_check_state is not None:
-                _wc_now = systime.perf_counter()
-                if self._pl_wreck_check_state == "waiting_2s":
-                    timer_stopped = (timer_raw_us == self._prev_timer_us)
-                    if timer_stopped:
-                        # Timer already stopped — real finish, commit estimate
-                        self.estimated_finish_us = self._pl_stale_estimate
-                        self._pl_wreck_check_state = None
-                        print(f"PL finish confirmed (timer stopped): {self._format_timer(self._pl_stale_estimate)}")
-                    elif _wc_now - self._pl_wreck_check_ts >= 2.0:
-                        # 2 s elapsed, timer still running — possible wreck
-                        self._pl_wreck_check_state = "waiting_progress"
-                        print("PL wreck check: 2 s elapsed, timer still running — waiting for progress change")
-                elif self._pl_wreck_check_state == "waiting_progress":
-                    if progress_raw != self._prev_progress:
-                        timer_still_running = (timer_raw_us > self._prev_timer_us)
-                        if timer_still_running:
-                            # Progress resumed with timer running — wreck confirmed
-                            self._finish_locked = False
-                            self._pl_wreck_check_state = None
-                            self._pl_stale_estimate = None
-                            print("PL wreck confirmed — undoing false finish, restarting detection")
-                        else:
-                            # Timer stopped by the time progress changed — use stale
+                if _ft_result is None:
+                    # Progress not yet above 99%
+                    self._pl_timer_stopped_frames = 0
+                elif _ft_result > 0:
+                    # Timer advancing, progress stalled — update rolling estimate
+                    self._pl_stale_estimate = _ft_result
+                    self._pl_timer_stopped_frames = 0
+                else:  # _ft_result == 0: timer stopped
+                    self._pl_timer_stopped_frames += 1
+                    if self._pl_timer_stopped_frames >= 2:
+                        _timer_at_stop = timer_raw_us
+                        if (self._pl_stale_estimate is not None
+                                and (_timer_at_stop - self._pl_stale_estimate) > 800_000):
                             self.estimated_finish_us = self._pl_stale_estimate
-                            self._pl_wreck_check_state = None
-                            print(f"PL timer stopped (fallback): {self._format_timer(self._pl_stale_estimate)}")
+                            print(f"PL finish confirmed (estimate): {self._format_timer(self._pl_stale_estimate)}")
+                        else:
+                            _fallback = max(0, _timer_at_stop - 1_000_000)
+                            self.estimated_finish_us = _fallback
+                            print(f"PL finish confirmed (fallback −1 s): {self._format_timer(_fallback)}")
+                        self._finish_locked = True
+
+            # -- Auto-finish on high progress (> 99.999%) --------------------
+            # Fires for both SP and PL whenever progress crosses this threshold
+            # inside a legitimised race.  Records the timer at first sight, then
+            # uses it as the finish time if no rolling PL estimate is available.
+            if (self._progress_legitimized
+                    and actively_racing
+                    and not self.race_completed
+                    and progress_raw > 0.99999):
+                if self._high_progress_timer_us is None:
+                    self._high_progress_timer_us = timer_raw_us
+                    print(f"High-progress auto-finish armed: "
+                          f"timer={self._format_timer(timer_raw_us)} ({timer_raw_us}us)")
+                if not self._finish_locked:
+                    # No prior estimate from PL trigger? Use first-observed timer.
+                    if self.estimated_finish_us is None:
+                        self.estimated_finish_us = self._high_progress_timer_us
+                    self._finish_locked = True
+                    self._handle_race_completion(from_pl_finish=True)
 
             # -- Percentage change -------------------------------------
             pct_changed = progress_raw != self._prev_progress
@@ -722,35 +744,48 @@ class ALUTimingTool:
                 or self._last_starting_ts is not None
             )
             if physics_update or (now - self.last_ui_update >= self.ui_update_interval):
-                self.ui.update_timer(self.current_timer_display)
-                if self.race_data_manager.is_new_split_available():
-                    self.ui.update_splits(timer_raw_us, progress_raw)
-                self.ui.update_percentage(self.percentage)
-                self.ui.update_gear_rpm(gear, rpm, should_show_overlays)
-                self.ui.update_velocity(velocity_raw, should_show_overlays)
-                self.ui.update_steering(steering_raw, should_show_overlays)
-                # Velocity delta: compare current speed vs ghost speed at same progress
-                ghost_loaded = self.race_data_manager.is_ghost_loaded()
-                ghost_vel_raw = None
-                if ghost_loaded and actively_racing:
-                    ghost_vel_raw = self.race_data_manager.get_ghost_velocity_at_progress(progress_raw)
-                self.ui.update_vdelta(
-                    velocity_raw, ghost_vel_raw, should_show_overlays,
-                    ghost_loaded=ghost_loaded and should_show_overlays,
-                    delta_s=self.last_delta_s,
-                    current_timer_us=timer_raw_us,
-                )
+                try:
+                    self.ui.update_timer(self.current_timer_display)
+                    if self.race_data_manager.is_new_split_available():
+                        self.ui.update_splits(timer_raw_us, progress_raw)
+                    self.ui.update_percentage(self.percentage)
+                    self.ui.update_gear_rpm(gear, rpm, should_show_overlays,
+                                             physics_update, timer_raw_us)
+                    self.ui.update_velocity(velocity_raw, should_show_overlays)
+                    self.ui.update_steering(steering_raw, should_show_overlays)
+                    self.ui.update_nitro(nitro_raw, should_show_overlays, nitro_on,
+                                         physics_update, timer_raw_us)
+                    self.ui.update_cp(checkpoint, progress_raw, should_show_overlays)
+                    # Velocity delta: compare current speed vs ghost speed at same progress
+                    ghost_loaded = self.race_data_manager.is_ghost_loaded()
+                    ghost_vel_raw = None
+                    if ghost_loaded and actively_racing:
+                        ghost_vel_raw = self.race_data_manager.get_ghost_velocity_at_progress(progress_raw)
+                    self.ui.update_vdelta(
+                        velocity_raw, ghost_vel_raw, should_show_overlays,
+                        ghost_loaded=ghost_loaded and should_show_overlays,
+                        delta_s=self.last_delta_s,
+                        current_timer_us=timer_raw_us,
+                    )
+                except Exception:
+                    # UI was destroyed (e.g. close during race) — stop updating
+                    # but keep the while loop running so de_client.stop() runs.
+                    pass
                 self.last_ui_update = now
 
             # -- Loop timing -------------------------------------------
             elapsed_ms = (systime.perf_counter() - loop_start) * 1000
             self.loop_times.append(elapsed_ms)
             self.avg_loop_time = sum(self.loop_times) / len(self.loop_times)
-            self.ui.update_loop_time(elapsed_ms, self.avg_loop_time)
+            try:
+                self.ui.update_loop_time(elapsed_ms, self.avg_loop_time)
+            except Exception:
+                pass
 
         # Main loop exited — now safe to remove all hooks from game memory.
         # This must run on the main thread AFTER the while loop to avoid racing
         # with an in-progress _capture_addresses() call.
+        print("Main loop exited — removing hooks...")
         self.de_client.stop()
 
 
