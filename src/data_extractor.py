@@ -1181,12 +1181,34 @@ class DataExtractor:
                 print(f"[DataExtractor] ✓ VT found via near-AOB @ {inj:#x}")
                 print(f"[DataExtractor]   AOB bytes : {refound.hex(' ')}")
             else:
-                raise RuntimeError(
-                    f"[DataExtractor] FATAL: VT instruction not found near expected offset "
-                    f"(reason: {self._last_fail_reason}).\n"
-                    "  The game may have been updated. Update _VT_STATIC_OFFSET and "
-                    "_VT_EXPECTED to match the current game version."
+                # For the GDK (Microsoft Store) variant the module layout differs
+                # significantly from Steam/Epic, so the VT instruction may sit far
+                # outside the ±2 MB Steam-centred window.  Try a full-module scan
+                # as a last resort — the 9-byte pattern is sufficiently unique that
+                # a false positive is very unlikely, and it is the only way to
+                # locate the instruction in a binary with a different address layout.
+                gdk_process = (
+                    self._active_process_name is not None
+                    and "gdk" in self._active_process_name.lower()
                 )
+                if gdk_process:
+                    print(
+                        f"[DataExtractor]   near-AOB failed for GDK variant — "
+                        f"trying full-module scan…"
+                    )
+                    fallback = self._aob_scan(self._AOB_VT)
+                if fallback:
+                    inj = fallback
+                    refound = bytes(self._pm.read_bytes(inj, len(self._VT_EXPECTED)))
+                    print(f"[DataExtractor] ✓ VT found via full-module AOB @ {inj:#x}")
+                    print(f"[DataExtractor]   AOB bytes : {refound.hex(' ')}")
+                else:
+                    raise RuntimeError(
+                        f"[DataExtractor] FATAL: VT instruction not found near expected offset "
+                        f"(reason: {self._last_fail_reason}).\n"
+                        "  The game may have been updated. Update _VT_STATIC_OFFSET and "
+                        "_VT_EXPECTED to match the current game version."
+                    )
         else:
             print(f"[DataExtractor] ✓ VT static bytes match")
 

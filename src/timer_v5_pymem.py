@@ -83,6 +83,8 @@ class ALUTimingTool:
         # progress is stalled at >99%.  Once the timer stops, require 2
         # consecutive frames to confirm, then validate against the estimate.
         self._pl_stale_estimate: Optional[int] = None
+        self._pl_stale_progress: Optional[float] = 0
+        self._pl_estimates: list = []
         self._pl_timer_stopped_frames: int = 0
 
         # Guard against stale progress: memory keeps 100% from race N-1.
@@ -317,10 +319,10 @@ class ALUTimingTool:
             timer_increased = timer_us > prev_timer_us
             progress_increased = progress > prev_progress
             if timer_increased and not progress_increased:
-                return prev_timer_us
+                return prev_timer_us,prev_progress
             elif not timer_increased:
-                return 0
-        return None
+                return 0,None
+        return None,None
 
     # ------------------------------------------------------------------
     # Race state transitions
@@ -385,6 +387,8 @@ class ALUTimingTool:
         self._last_starting_ts = None
         self._starting_display_shown = False
         self._pl_stale_estimate = None
+        self._pl_stale_progress = 0
+        self._pl_estimates = []
         self._pl_timer_stopped_frames = 0
         self._high_progress_timer_us = None
         self.race_data_manager.reset_race_data()
@@ -536,10 +540,10 @@ class ALUTimingTool:
 
             # Transition to "ended" — game says race finished.
             if game_state == "ended_sp" and prev_game_state == "racing_sp":
-                self._handle_race_completion(True)
+                self._handle_race_completion(False)
                 if not self.race_completed and self.race_in_progress:
                     print("Game state: Race Ended")
-                    self._handle_race_completion()
+                    self._handle_race_completion(False)
                 # Hide motion overlays on race end; split view stays until menus.
                 self.ui.update_gear_rpm(0, 0, False)
                 self.ui.update_velocity(0.0, False)
@@ -640,17 +644,19 @@ class ALUTimingTool:
                     self.ui.update_cp(0, 0.0, False)
                     self.ui.auto_hide_race_overlays()
                     self.ui.schedule_split_view_reset()
+            is_pl = game_state == ("racing_pl" or prev_game_state == "racing_pl") and self.race_in_progress
             prev_game_state = game_state
 
             # -- Only process data while actually racing ---------------
             actively_racing = game_state in ("racing_pl", "racing_sp") and self.race_in_progress
-            is_pl = game_state == "racing_pl" and self.race_in_progress
             # -- Finish trigger ----------------------------------------
             if game_state in ("menus", "starting"):
                 self.estimated_finish_us = None
                 self._finish_locked = False
                 self._progress_legitimized = False
                 self._pl_stale_estimate = None
+                self._pl_stale_progress = 0
+                self._pl_estimates = []
                 self._pl_timer_stopped_frames = 0
 
             float_pct = round(progress_raw * 100, 2) if 0.0 <= progress_raw <= 1.0 else round(progress_raw, 2)
@@ -670,25 +676,33 @@ class ALUTimingTool:
             #   if estimate is >0.8 s before timer_at_stop  → use estimate
             #   else                                         → timer_at_stop − 1 s
             if self._progress_legitimized and is_pl and not self._finish_locked:
-                _ft_result = self._check_finish_trigger_new(
+                _ft_result,_ft_progress = self._check_finish_trigger_new(
                     progress_raw, self._prev_progress, timer_raw_us, self._prev_timer_us
                 )
                 if _ft_result is None:
                     # Progress not yet above 99%
                     self._pl_timer_stopped_frames = 0
-                elif _ft_result > 0:
+                elif _ft_result > 0 and self._pl_stale_progress < _ft_progress:
                     # Timer advancing, progress stalled — update rolling estimate
+                    self._pl_stale_progress = _ft_progress
                     self._pl_stale_estimate = _ft_result
+                    self._pl_estimates.insert(0,_ft_result)
+                    print(f"Potential PL finish detection: {self._pl_stale_estimate}us at {progress_raw}")
                     self._pl_timer_stopped_frames = 0
-                else:  # _ft_result == 0: timer stopped
+                elif _ft_result == 0 and self._pl_timer_stopped_frames == 0:
                     self._pl_timer_stopped_frames += 1
-                    if self._pl_timer_stopped_frames >= 2:
-                        _timer_at_stop = timer_raw_us
-                        if (self._pl_stale_estimate is not None
-                                and (_timer_at_stop - self._pl_stale_estimate) > 800_000):
-                            self.estimated_finish_us = self._pl_stale_estimate
+                    _timer_at_stop = timer_raw_us
+                elif _ft_result == 0:  # _ft_result == 0: timer stopped
+                    self._pl_timer_stopped_frames += 1
+                    if self._pl_timer_stopped_frames >= 10:
+                        found = False
+                        if len(self._pl_estimates) > 0:
+                            for est in self._pl_estimates: 
+                                if _timer_at_stop - est > 1_000_000 and not found:
+                                    found = True
+                                    self.estimated_finish_us = est
                             print(f"PL finish confirmed (estimate): {self._format_timer(self._pl_stale_estimate)}")
-                        else:
+                        if not found:
                             _fallback = max(0, _timer_at_stop - 1_000_000)
                             self.estimated_finish_us = _fallback
                             print(f"PL finish confirmed (fallback −1 s): {self._format_timer(_fallback)}")
@@ -701,7 +715,7 @@ class ALUTimingTool:
             if (self._progress_legitimized
                     and actively_racing
                     and not self.race_completed
-                    and progress_raw > 0.99999):
+                    and 0.99999 < progress_raw <= 1.0):
                 if self._high_progress_timer_us is None:
                     self._high_progress_timer_us = timer_raw_us
                     print(f"High-progress auto-finish armed: "
@@ -715,19 +729,19 @@ class ALUTimingTool:
 
             # -- Percentage change -------------------------------------
             pct_changed = progress_raw != self._prev_progress
-            if pct_changed and actively_racing and not self.race_completed:
-                if self._process_percentage_change(progress_raw, self._prev_progress, timer_raw_us, velocity_raw):
-                    self._prev_progress = progress_raw
+            if actively_racing and not self.race_completed:
+                if pct_changed: self._process_percentage_change(progress_raw, self._prev_progress, timer_raw_us, velocity_raw)
+                self._prev_progress = progress_raw
 
             if actively_racing:
                 self.percentage = f"{round(progress_raw*100,2)}%"
 
             # -- Timer change ------------------------------------------
             if timer_raw_us != self._prev_timer_us and actively_racing and not self.race_completed:
-                self._prev_timer_us = timer_raw_us
                 self.current_timer_us = timer_raw_us
                 self.last_captured_timer_us = timer_raw_us
                 self.current_timer_display = self._format_timer(timer_raw_us, ms=True)
+            self._prev_timer_us = timer_raw_us
 
             # -- Non-race UI reset -------------------------------------
             if not actively_racing and not self.race_completed:
